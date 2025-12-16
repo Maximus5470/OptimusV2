@@ -1,0 +1,19 @@
+{
+  "language": "python",
+  "source_code": "print(input())",
+  "test_cases": [
+    {
+      "id": 1,
+      "input": "hello",
+      "expected_output": "hello",
+      "weight": 10
+    },
+    {
+      "id": 2,
+      "input": "world",
+      "expected_output": "world",
+      "weight": 15
+    }
+  ],
+  "timeout_ms": 5000
+}

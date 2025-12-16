@@ -1,0 +1,25 @@
+{
+  "language": "python",
+  "source_code": "print('wrong output')",
+  "test_cases": [
+    {
+      "id": 1,
+      "input": "test1",
+      "expected_output": "test2",
+      "weight": 10
+    },
+    {
+      "id": 2,
+      "input": "test2",
+      "expected_output": "test2",
+      "weight": 20
+    },
+    {
+      "id": 3,
+      "input": "test3",
+      "expected_output": "test3",
+      "weight": 30
+    }
+  ],
+  "timeout_ms": 5000
+}
