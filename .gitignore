@@ -100,3 +100,7 @@ env/
 *.o
 *.a
 *.class
+
+# Markdown files (except README.md)
+*.md
+!README.md
