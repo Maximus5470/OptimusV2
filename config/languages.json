@@ -1,0 +1,34 @@
+{
+  "languages": [
+    {
+      "name": "python",
+      "version": "3.11",
+      "image": "optimus-python:latest",
+      "dockerfile_path": "dockerfiles/python/Dockerfile",
+      "execution": {
+        "command": "python",
+        "args": ["-u"],
+        "file_extension": ".py"
+      },
+      "queue_name": "jobs:python",
+      "timeout_seconds": 60,
+      "memory_limit_mb": 256,
+      "cpu_limit": 0.5
+    },
+    {
+      "name": "java",
+      "version": "17",
+      "image": "optimus-java:latest",
+      "dockerfile_path": "dockerfiles/java/Dockerfile",
+      "execution": {
+        "command": "java",
+        "args": [],
+        "file_extension": ".java"
+      },
+      "queue_name": "jobs:java",
+      "timeout_seconds": 90,
+      "memory_limit_mb": 512,
+      "cpu_limit": 1.0
+    }
+  ]
+}

@@ -1,0 +1,25 @@
+# Rust build artifacts
+target/
+Cargo.lock
+
+# Git
+.git/
+.gitignore
+
+# IDE
+.vscode/
+.idea/
+
+# Documentation
+*.md
+!README.md
+
+# CI/CD
+.github/
+
+# Kubernetes
+k8s/
+
+# Development
+.env
+.env.local

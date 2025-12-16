@@ -1,0 +1,41 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: optimus-worker
+  namespace: optimus
+spec:
+  replicas: 1  # Will be scaled by KEDA
+  selector:
+    matchLabels:
+      app: optimus-worker
+  template:
+    metadata:
+      labels:
+        app: optimus-worker
+    spec:
+      containers:
+      - name: optimus-worker
+        image: optimus-worker:latest
+        imagePullPolicy: IfNotPresent
+        env:
+        - name: REDIS_HOST
+          value: "redis:6379"
+        - name: RUST_LOG
+          value: "info"
+        - name: DOCKER_HOST
+          value: "unix:///var/run/docker.sock"
+        volumeMounts:
+        - name: docker-sock
+          mountPath: /var/run/docker.sock
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "200m"
+          limits:
+            memory: "1Gi"
+            cpu: "1000m"
+      volumes:
+      - name: docker-sock
+        hostPath:
+          path: /var/run/docker.sock
+          type: Socket

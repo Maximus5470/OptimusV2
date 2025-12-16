@@ -1,0 +1,23 @@
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: optimus-worker-java-scaler
+  namespace: optimus
+spec:
+  scaleTargetRef:
+    name: optimus-worker
+  minReplicaCount: 0
+  maxReplicaCount: 10
+  pollingInterval: 15
+  cooldownPeriod: 60
+  triggers:
+  - type: redis
+    metadata:
+      # Redis connection
+      address: redis:6379
+      # Queue name for Java jobs
+      listName: jobs:java
+      # Scale up when queue has more than 5 items
+      listLength: "5"
+      # Use password if Redis is secured (optional)
+      # passwordFromEnv: REDIS_PASSWORD

@@ -1,0 +1,31 @@
+# Optimus Configuration
+
+[redis]
+host = "localhost:6379"
+# password = "your_redis_password"  # Uncomment if Redis requires authentication
+pool_size = 10
+
+[server]
+host = "0.0.0.0"
+port = 8080
+timeout_seconds = 300
+
+[worker]
+# Number of concurrent job processors per worker
+concurrency = 4
+# Timeout for individual job execution (seconds)
+job_timeout = 60
+# Poll interval for checking Redis queue (milliseconds)
+poll_interval_ms = 1000
+
+[docker]
+# Docker socket path
+socket_path = "/var/run/docker.sock"
+# Default memory limit for containers (MB)
+memory_limit_mb = 512
+# Default CPU limit (fraction of a core, e.g., 0.5 = 50%)
+cpu_limit = 0.5
+
+[logging]
+level = "info"
+format = "json"

@@ -1,0 +1,14 @@
+# Base image for language execution environments (optional)
+FROM debian:bookworm-slim
+
+WORKDIR /code
+
+# Install common tools
+RUN apt-get update && \
+    apt-get install -y \
+    ca-certificates \
+    curl \
+    git \
+    && rm -rf /var/lib/apt/lists/*
+
+CMD ["/bin/bash"]
