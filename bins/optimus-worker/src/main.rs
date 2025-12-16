@@ -69,8 +69,14 @@ async fn worker_loop(
                 println!("═══════════════════════════════════════════");
                 println!();
                 
-                // Execute job with dummy executor
-                let result = executor::execute_dummy(&job);
+                // Execute job with Docker executor
+                let result = match executor::execute_docker(&job).await {
+                    Ok(result) => result,
+                    Err(e) => {
+                        eprintln!("✗ Docker execution failed: {}", e);
+                        continue;
+                    }
+                };
                 
                 println!();
                 println!("═══════════════════════════════════════════");

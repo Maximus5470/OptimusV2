@@ -12,9 +12,10 @@
 /// - How code executes (engine's job)
 /// - How scoring works (evaluator's job)
 
-use crate::engine::{execute_job, DummyEngine};
+use crate::engine::{execute_job, execute_job_async, DummyEngine, DockerEngine};
 use crate::evaluator;
 use optimus_common::types::{ExecutionResult, JobRequest};
+use anyhow::Result;
 
 /// Execute a job using dummy engine + evaluator
 ///
@@ -36,6 +37,30 @@ pub fn execute_dummy(job: &JobRequest) -> ExecutionResult {
 
     result
 }
+
+/// Execute a job using Docker engine + evaluator
+///
+/// This is the production execution path:
+/// - DockerEngine runs code in sandboxed containers
+/// - Evaluator scores outputs (same as dummy)
+/// - Results are aggregated (same as dummy)
+pub async fn execute_docker(job: &JobRequest) -> Result<ExecutionResult> {
+    println!("→ Starting job execution: {}", job.id);
+    println!("  Using: DockerEngine + Evaluator");
+    println!();
+
+    // Step 1: Create Docker engine
+    let engine = DockerEngine::new()?;
+
+    // Step 2: Execute with Docker engine
+    let outputs = execute_job_async(job, &engine).await;
+
+    // Step 3: Evaluate outputs (same evaluator as dummy)
+    let result = evaluator::evaluate(job, outputs);
+
+    Ok(result)
+}
+
 
 #[cfg(test)]
 mod tests {

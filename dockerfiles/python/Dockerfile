@@ -9,5 +9,8 @@ RUN pip install --no-cache-dir \
     numpy \
     requests
 
-# Default command (will be overridden)
-CMD ["python", "--version"]
+# Create runner script
+COPY dockerfiles/python/runner.py /runner.py
+
+# Default command runs the runner
+CMD ["python", "/runner.py"]
