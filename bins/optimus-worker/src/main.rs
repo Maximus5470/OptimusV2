@@ -1,14 +1,26 @@
 mod engine;
 mod evaluator;
 mod executor;
+mod config;
 
 use optimus_common::redis;
 use optimus_common::types::Language;
 use tokio::signal;
+use config::LanguageConfigManager;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     println!("Optimus Worker booting...");
+
+    // Load language configurations
+    let config_manager = LanguageConfigManager::load_default()
+        .map_err(|e| {
+            eprintln!("✗ Failed to load language configurations: {}", e);
+            eprintln!("  Make sure config/languages.json exists");
+            e
+        })?;
+    
+    println!("✓ Loaded language configurations for: {:?}", config_manager.list_languages());
 
     // Get language from environment
     let language_str = std::env::var("WORKER_LANGUAGE")
@@ -25,6 +37,21 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
+    // Validate language is configured
+    if let Err(e) = config_manager.get_config(&language) {
+        eprintln!("✗ Language '{}' is not configured: {}", language, e);
+        eprintln!("  Available languages: {:?}", config_manager.list_languages());
+        std::process::exit(1);
+    }
+
+    // Get language-specific settings
+    let queue_name = config_manager.get_queue_name(&language)?;
+    let image = config_manager.get_image(&language)?;
+    
+    println!("✓ Worker configured for language: {}", language);
+    println!("  Docker image: {}", image);
+    println!("  Queue: {}", queue_name);
+
     // Connect to Redis
     let redis_url = std::env::var("REDIS_URL")
         .unwrap_or_else(|_| "redis://127.0.0.1:6379".to_string());
@@ -33,8 +60,6 @@ async fn main() -> anyhow::Result<()> {
     let mut redis_conn = ::redis::aio::ConnectionManager::new(client).await?;
     
     println!("✓ Connected to Redis: {}", redis_url);
-    println!("✓ Worker configured for language: {}", language);
-    println!("✓ Listening for jobs on queue: optimus:queue:{}", language);
     println!();
 
     // Setup graceful shutdown
@@ -44,7 +69,7 @@ async fn main() -> anyhow::Result<()> {
     };
 
     tokio::select! {
-        _ = worker_loop(&mut redis_conn, &language) => {},
+        _ = worker_loop(&mut redis_conn, &language, &config_manager) => {},
         _ = shutdown => {},
     }
 
@@ -55,6 +80,7 @@ async fn main() -> anyhow::Result<()> {
 async fn worker_loop(
     redis_conn: &mut ::redis::aio::ConnectionManager,
     language: &Language,
+    config_manager: &LanguageConfigManager,
 ) -> anyhow::Result<()> {
     loop {
         // BLPOP with 5 second timeout for graceful shutdown
@@ -66,11 +92,19 @@ async fn worker_loop(
                 println!("Timeout: {}ms", job.timeout_ms);
                 println!("Test cases: {}", job.test_cases.len());
                 println!("Source code size: {} bytes", job.source_code.len());
+                
+                // Display language-specific configuration
+                if let Ok(config) = config_manager.get_config(&job.language) {
+                    println!("Docker image: {}", config.image);
+                    println!("Memory limit: {}MB", config.memory_limit_mb);
+                    println!("CPU limit: {}", config.cpu_limit);
+                }
+                
                 println!("═══════════════════════════════════════════");
                 println!();
                 
-                // Execute job with Docker executor
-                let result = match executor::execute_docker(&job).await {
+                // Execute job with Docker executor (now using config)
+                let result = match executor::execute_docker(&job, config_manager).await {
                     Ok(result) => result,
                     Err(e) => {
                         eprintln!("✗ Docker execution failed: {}", e);

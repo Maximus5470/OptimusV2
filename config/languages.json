@@ -7,11 +7,12 @@
       "dockerfile_path": "dockerfiles/python/Dockerfile",
       "execution": {
         "command": "python",
-        "args": ["-u"],
+        "args": [
+          "-u"
+        ],
         "file_extension": ".py"
       },
-      "queue_name": "jobs:python",
-      "timeout_seconds": 60,
+      "queue_name": "optimus:queue:python",
       "memory_limit_mb": 256,
       "cpu_limit": 0.5
     },
@@ -25,8 +26,21 @@
         "args": [],
         "file_extension": ".java"
       },
-      "queue_name": "jobs:java",
-      "timeout_seconds": 90,
+      "queue_name": "optimus:queue:java",
+      "memory_limit_mb": 512,
+      "cpu_limit": 1.0
+    },
+    {
+      "name": "rust",
+      "version": "1.75",
+      "image": "optimus-rust:latest",
+      "dockerfile_path": "dockerfiles/rust/Dockerfile",
+      "execution": {
+        "command": "rust",
+        "args": [],
+        "file_extension": ".rs"
+      },
+      "queue_name": "optimus:queue:rust",
       "memory_limit_mb": 512,
       "cpu_limit": 1.0
     }

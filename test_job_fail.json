@@ -1,6 +1,7 @@
 {
+  "id": "223e4567-e89b-12d3-a456-426614174001",
   "language": "python",
-  "source_code": "print('wrong output')",
+  "source_code": "print(input())",
   "test_cases": [
     {
       "id": 1,

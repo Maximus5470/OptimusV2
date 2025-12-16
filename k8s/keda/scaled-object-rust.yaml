@@ -1,0 +1,19 @@
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: worker-rust
+  namespace: optimus
+spec:
+  scaleTargetRef:
+    name: optimus-worker-rust
+  minReplicaCount: 0
+  maxReplicaCount: 10
+  pollingInterval: 5
+  cooldownPeriod: 30
+  triggers:
+    - type: redis
+      metadata:
+        address: redis-master:6379
+        listName: jobs:rust
+        listLength: "1"
+        enableTLS: "false"

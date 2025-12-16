@@ -11,9 +11,10 @@
 ///
 /// **Why This Exists:**
 /// Enables swappable execution backends without touching scoring logic.
-/// DummyEngine → DockerEngine → K8s Engine → Lambda Engine (all compatible)
+/// Production uses DockerEngine with language-aware configuration.
 
 use crate::evaluator::TestExecutionOutput;
+use crate::config::LanguageConfigManager;
 use optimus_common::types::{JobRequest, Language};
 use bollard::{Docker, container::Config, image::CreateImageOptions, container::{CreateContainerOptions, StartContainerOptions, WaitContainerOptions, RemoveContainerOptions}};
 use bollard::container::LogOutput;
@@ -22,138 +23,11 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result};
 use base64::{Engine as _, engine::general_purpose};
 
-/// Execution engine trait
-/// 
-/// Any implementation must guarantee:
-/// 1. Execute source_code with given input
-/// 2. Respect timeout_ms
-/// 3. Capture stdout/stderr
-/// 4. Report timing information
-/// 5. Flag timeouts and runtime errors
-pub trait ExecutionEngine {
-    /// Execute code for a single test case
-    ///
-    /// ## Arguments
-    /// * `source_code` - The source code to execute
-    /// * `input` - The stdin input for this test case
-    /// * `timeout_ms` - Maximum execution time
-    ///
-    /// ## Returns
-    /// Raw execution output (stdout, stderr, timing, error flags)
-    fn execute(
-        &self,
-        source_code: &str,
-        input: &str,
-        timeout_ms: u64,
-    ) -> TestExecutionOutput;
-}
-
-/// Dummy execution engine for testing and validation
-///
-/// **Dummy Execution Rules:**
-/// 1. Treats source_code as ignored
-/// 2. stdout = input.trim() (echo semantics)
-/// 3. Never times out
-/// 4. Never has runtime errors
-/// 5. Fixed execution time: 5ms
-///
-/// **Purpose:**
-/// Validate architecture, scoring, and result aggregation
-/// before introducing Docker complexity.
-pub struct DummyEngine;
-
-impl DummyEngine {
-    pub fn new() -> Self {
-        DummyEngine
-    }
-}
-
-impl Default for DummyEngine {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl ExecutionEngine for DummyEngine {
-    fn execute(
-        &self,
-        _source_code: &str,
-        input: &str,
-        _timeout_ms: u64,
-    ) -> TestExecutionOutput {
-        // Dummy execution: stdout = input (trimmed)
-        let stdout = input.trim().to_string();
-
-        TestExecutionOutput {
-            test_id: 0, // Will be set by executor
-            stdout,
-            stderr: String::new(),
-            execution_time_ms: 5, // Fixed dummy time
-            timed_out: false,
-            runtime_error: false,
-        }
-    }
-}
-
-/// Execute a complete job using the provided execution engine
-///
-/// This function:
-/// 1. Iterates through all test cases
-/// 2. Calls engine.execute() for each
-/// 3. Collects raw outputs
-/// 4. Returns outputs for Evaluator
-///
-/// ## Arguments
-/// * `job` - The job to execute
-/// * `engine` - The execution engine to use
-///
-/// ## Returns
-/// Vector of raw execution outputs (one per test case)
-pub fn execute_job<E: ExecutionEngine>(
-    job: &JobRequest,
-    engine: &E,
-) -> Vec<TestExecutionOutput> {
-    let mut outputs = Vec::new();
-
-    println!("→ Executing {} test cases", job.test_cases.len());
-    println!("  Timeout per test: {}ms", job.timeout_ms);
-    println!();
-
-    for test_case in &job.test_cases {
-        println!("  Executing test {} (id: {})", outputs.len() + 1, test_case.id);
-
-        // Execute with engine
-        let mut output = engine.execute(
-            &job.source_code,
-            &test_case.input,
-            job.timeout_ms,
-        );
-
-        // Set correct test_id
-        output.test_id = test_case.id;
-
-        println!("    Execution time: {}ms", output.execution_time_ms);
-        if output.timed_out {
-            println!("    ⚠ Timed out");
-        }
-        if output.runtime_error {
-            println!("    ✗ Runtime error");
-        }
-
-        outputs.push(output);
-    }
-
-    println!();
-    println!("→ All test cases executed");
-
-    outputs
-}
-
 /// Execute a complete job using DockerEngine (async version)
 ///
 /// This function:
 /// 1. Iterates through all test cases
-/// 2. Calls engine.execute_async() for each
+/// 2. Calls engine.execute_in_container() for each
 /// 3. Collects raw outputs
 /// 4. Returns outputs for Evaluator
 ///
@@ -223,105 +97,6 @@ pub async fn execute_job_async(
     outputs
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use optimus_common::types::{Language, TestCase};
-    use uuid::Uuid;
-
-    #[test]
-    fn test_dummy_engine_echo() {
-        let engine = DummyEngine::new();
-
-        let output = engine.execute("ignored code", "hello world", 5000);
-
-        assert_eq!(output.stdout, "hello world");
-        assert_eq!(output.stderr, "");
-        assert_eq!(output.execution_time_ms, 5);
-        assert!(!output.timed_out);
-        assert!(!output.runtime_error);
-    }
-
-    #[test]
-    fn test_dummy_engine_trims_input() {
-        let engine = DummyEngine::new();
-
-        let output = engine.execute("code", "  test  \n", 1000);
-
-        assert_eq!(output.stdout, "test");
-    }
-
-    #[test]
-    fn test_execute_job_multiple_tests() {
-        let job = JobRequest {
-            id: Uuid::new_v4(),
-            language: Language::Python,
-            source_code: "# dummy".to_string(),
-            test_cases: vec![
-                TestCase {
-                    id: 1,
-                    input: "input1".to_string(),
-                    expected_output: "output1".to_string(),
-                    weight: 10,
-                },
-                TestCase {
-                    id: 2,
-                    input: "input2".to_string(),
-                    expected_output: "output2".to_string(),
-                    weight: 15,
-                },
-            ],
-            timeout_ms: 5000,
-        };
-
-        let engine = DummyEngine::new();
-        let outputs = execute_job(&job, &engine);
-
-        assert_eq!(outputs.len(), 2);
-        assert_eq!(outputs[0].test_id, 1);
-        assert_eq!(outputs[0].stdout, "input1");
-        assert_eq!(outputs[1].test_id, 2);
-        assert_eq!(outputs[1].stdout, "input2");
-    }
-
-    #[test]
-    fn test_execute_job_preserves_test_order() {
-        let job = JobRequest {
-            id: Uuid::new_v4(),
-            language: Language::Java,
-            source_code: String::new(),
-            test_cases: vec![
-                TestCase {
-                    id: 5,
-                    input: "a".to_string(),
-                    expected_output: "x".to_string(),
-                    weight: 1,
-                },
-                TestCase {
-                    id: 3,
-                    input: "b".to_string(),
-                    expected_output: "y".to_string(),
-                    weight: 1,
-                },
-                TestCase {
-                    id: 7,
-                    input: "c".to_string(),
-                    expected_output: "z".to_string(),
-                    weight: 1,
-                },
-            ],
-            timeout_ms: 1000,
-        };
-
-        let engine = DummyEngine::new();
-        let outputs = execute_job(&job, &engine);
-
-        assert_eq!(outputs[0].test_id, 5);
-        assert_eq!(outputs[1].test_id, 3);
-        assert_eq!(outputs[2].test_id, 7);
-    }
-}
-
 /// Docker-based execution engine for real sandboxed code execution
 ///
 /// **Docker Execution Rules:**
@@ -340,27 +115,80 @@ mod tests {
 /// Production-grade sandboxed execution with resource isolation
 pub struct DockerEngine {
     docker: Docker,
+    config_manager: Option<LanguageConfigManager>,
 }
 
 impl DockerEngine {
-    /// Create a new Docker engine instance
-    pub fn new() -> Result<Self> {
+    /// Create a new Docker engine with language config manager
+    pub fn new_with_config(config_manager: &LanguageConfigManager) -> Result<Self> {
         let docker = Docker::connect_with_local_defaults()
             .context("Failed to connect to Docker daemon")?;
-        Ok(DockerEngine { docker })
+        
+        // Clone the config manager for use in this engine
+        Ok(DockerEngine { 
+            docker,
+            config_manager: Some(config_manager.clone()),
+        })
     }
 
     /// Get the Docker image name for a language
-    fn get_image_name(language: &Language) -> &'static str {
+    fn get_image_name(&self, language: &Language) -> String {
+        // Try config manager first, fallback to hardcoded values
+        if let Some(ref config) = self.config_manager {
+            if let Ok(image) = config.get_image(language) {
+                return image;
+            }
+        }
+        
+        // Fallback to hardcoded defaults
         match language {
-            Language::Python => "optimus-python:latest",
-            Language::Java => "optimus-java:latest",
-            Language::Rust => "optimus-rust:latest",
+            Language::Python => "optimus-python:latest".to_string(),
+            Language::Java => "optimus-java:latest".to_string(),
+            Language::Rust => "optimus-rust:latest".to_string(),
         }
     }
 
     /// Get the execution command for a language
-    fn get_execution_command(language: &Language) -> Vec<String> {
+    fn get_execution_command(&self, language: &Language) -> Vec<String> {
+        // Use the runner script from the Docker image
+        // The runner handles decoding SOURCE_CODE and TEST_INPUT env vars
+        match language {
+            Language::Python => vec!["python".to_string(), "/runner.py".to_string()],
+            Language::Java => vec!["java".to_string(), "/runner.sh".to_string()],
+            Language::Rust => vec!["rust".to_string(), "/runner.sh".to_string()],
+        }
+    }
+
+    /// Old implementation - kept for reference
+    fn _get_execution_command_old(&self, language: &Language) -> Vec<String> {
+        // Try config manager first, fallback to hardcoded values
+        if let Some(ref config) = self.config_manager {
+            if let Ok(cmd) = config.get_command(language) {
+                // Add file path to command
+                let file_ext = config.get_file_extension(language)
+                    .unwrap_or_else(|_| {
+                        // Fallback file extensions
+                        match language {
+                            Language::Python => ".py".to_string(),
+                            Language::Java => ".java".to_string(),
+                            Language::Rust => ".rs".to_string(),
+                        }
+                    });
+                let filename = format!("/code/main{}", file_ext);
+                
+                let mut full_cmd = cmd;
+                // For Python, add -u and filename
+                if matches!(language, Language::Python) {
+                    full_cmd.push(filename);
+                } else {
+                    // For other languages, append filename if needed
+                    full_cmd.push(filename);
+                }
+                return full_cmd;
+            }
+        }
+        
+        // Fallback to hardcoded defaults
         match language {
             Language::Python => vec!["python".to_string(), "-u".to_string(), "/code/main.py".to_string()],
             Language::Java => vec!["java".to_string(), "Main".to_string()],
@@ -368,17 +196,37 @@ impl DockerEngine {
         }
     }
 
-    /// Get the file name for source code
-    fn get_source_filename(language: &Language) -> &'static str {
-        match language {
-            Language::Python => "main.py",
-            Language::Java => "Main.java",
-            Language::Rust => "main.rs",
+    /// Get memory limit for a language
+    fn get_memory_limit(&self, language: &Language) -> i64 {
+        if let Some(ref config) = self.config_manager {
+            if let Ok(limit_mb) = config.get_memory_limit_mb(language) {
+                return (limit_mb as i64) * 1024 * 1024;
+            }
         }
+        256 * 1024 * 1024 // Default: 256MB
+    }
+
+    /// Get CPU limit for a language
+    fn get_cpu_limit(&self, language: &Language) -> i64 {
+        if let Some(ref config) = self.config_manager {
+            if let Ok(limit) = config.get_cpu_limit(language) {
+                return (limit * 1_000_000_000.0) as i64;
+            }
+        }
+        500_000_000 // Default: 0.5 CPU
     }
 
     /// Ensure Docker image is available (pull if needed)
     async fn ensure_image(&self, image: &str) -> Result<()> {
+        // First check if image exists locally
+        let inspect_result = self.docker.inspect_image(image).await;
+        
+        if inspect_result.is_ok() {
+            // Image exists locally, no need to pull
+            return Ok(());
+        }
+
+        // Image doesn't exist, try to pull it
         let options = Some(CreateImageOptions {
             from_image: image,
             ..Default::default()
@@ -401,14 +249,14 @@ impl DockerEngine {
         input: &str,
         timeout_ms: u64,
     ) -> Result<TestExecutionOutput> {
-        let image = Self::get_image_name(language);
+        let image = self.get_image_name(language);
         let container_name = format!("optimus-{}", uuid::Uuid::new_v4());
 
         // Ensure image is available
-        self.ensure_image(image).await?;
+        self.ensure_image(&image).await?;
 
         // Prepare environment and command
-        let cmd = Self::get_execution_command(language);
+        let cmd = self.get_execution_command(language);
         
         // Create container configuration
         let env = vec![
@@ -416,16 +264,20 @@ impl DockerEngine {
             format!("TEST_INPUT={}", general_purpose::STANDARD.encode(input)),
         ];
 
+        // Get resource limits from config
+        let memory_limit = self.get_memory_limit(language);
+        let cpu_limit = self.get_cpu_limit(language);
+
         let config = Config {
-            image: Some(image.to_string()),
+            image: Some(image.clone()),
             cmd: Some(cmd),
             env: Some(env),
             attach_stdout: Some(true),
             attach_stderr: Some(true),
             network_disabled: Some(true),
             host_config: Some(bollard::models::HostConfig {
-                memory: Some(256 * 1024 * 1024), // 256MB
-                nano_cpus: Some(500_000_000), // 0.5 CPU
+                memory: Some(memory_limit),
+                nano_cpus: Some(cpu_limit),
                 readonly_rootfs: Some(false), // Allow writes to /tmp
                 ..Default::default()
             }),
@@ -529,36 +381,6 @@ impl DockerEngine {
             execution_time_ms,
             timed_out,
             runtime_error,
-        })
-    }
-}
-
-impl ExecutionEngine for DockerEngine {
-    fn execute(
-        &self,
-        source_code: &str,
-        input: &str,
-        timeout_ms: u64,
-    ) -> TestExecutionOutput {
-        // Create a runtime for async execution
-        // Note: In production, this should be handled by the worker's main runtime
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        
-        rt.block_on(async {
-            // For now, we'll assume Python. In production, language should be passed
-            self.execute_in_container(&Language::Python, source_code, input, timeout_ms)
-                .await
-                .unwrap_or_else(|e| {
-                    eprintln!("Docker execution error: {}", e);
-                    TestExecutionOutput {
-                        test_id: 0,
-                        stdout: String::new(),
-                        stderr: format!("Docker execution error: {}", e),
-                        execution_time_ms: 0,
-                        timed_out: false,
-                        runtime_error: true,
-                    }
-                })
         })
     }
 }
