@@ -76,19 +76,6 @@ impl LanguageConfigManager {
         Ok(self.get_config(language)?.image.clone())
     }
 
-    /// Get execution command for a language
-    pub fn get_command(&self, language: &Language) -> Result<Vec<String>> {
-        let config = self.get_config(language)?;
-        let mut cmd = vec![config.execution.command.clone()];
-        cmd.extend(config.execution.args.clone());
-        Ok(cmd)
-    }
-
-    /// Get file extension for a language
-    pub fn get_file_extension(&self, language: &Language) -> Result<String> {
-        Ok(self.get_config(language)?.execution.file_extension.clone())
-    }
-
     /// Get queue name for a language
     pub fn get_queue_name(&self, language: &Language) -> Result<String> {
         Ok(self.get_config(language)?.queue_name.clone())

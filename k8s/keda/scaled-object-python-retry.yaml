@@ -1,0 +1,23 @@
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: optimus-worker-python-retry-scaler
+  namespace: optimus
+spec:
+  scaleTargetRef:
+    name: optimus-worker
+  minReplicaCount: 0
+  maxReplicaCount: 5
+  pollingInterval: 30
+  cooldownPeriod: 120
+  triggers:
+  - type: redis
+    metadata:
+      # Redis connection
+      address: redis:6379
+      # Retry queue name for Python jobs
+      listName: optimus:queue:python:retry
+      # Scale up when retry queue has more than 3 items
+      listLength: "3"
+      # Activate scaling from 0 when there are any retries
+      activationListLength: "1"

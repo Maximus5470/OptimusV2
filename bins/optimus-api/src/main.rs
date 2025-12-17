@@ -1,7 +1,9 @@
 mod handlers;
 mod routes;
+mod metrics;
 
 use axum::Router;
+use futures_util::StreamExt;
 use redis::aio::ConnectionManager;
 use std::sync::Arc;
 use tokio::net::TcpListener;
@@ -10,6 +12,7 @@ use tracing::info;
 #[derive(Clone)]
 pub struct AppState {
     pub redis: ConnectionManager,
+    pub start_time: Arc<std::time::Instant>,
 }
 
 #[tokio::main]
@@ -25,6 +28,10 @@ async fn main() {
 
     info!("Optimus API booting...");
 
+    // Initialize metrics
+    metrics::init_metrics();
+    info!("Metrics registry initialized");
+
     // Connect to Redis
     let redis_url = std::env::var("REDIS_URL")
         .unwrap_or_else(|_| "redis://127.0.0.1:6379".to_string());
@@ -38,8 +45,12 @@ async fn main() {
     info!("Connected to Redis: {}", redis_url);
 
     let state = Arc::new(AppState {
-        redis: redis_conn,
+        redis: redis_conn.clone(),
+        start_time: Arc::new(std::time::Instant::now()),
     });
+
+    // Start background metrics subscriber
+    tokio::spawn(metrics_subscriber());
 
     // Build router
     let app = Router::new()
@@ -57,3 +68,59 @@ async fn main() {
     axum::serve(listener, app).await
         .expect("Server error");
 }
+
+/// Background task to subscribe to job completion events and update metrics
+async fn metrics_subscriber() {
+    let client = match redis::Client::open(
+        std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".to_string()).as_str()
+    ) {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::error!("Failed to create Redis client for metrics subscriber: {}", e);
+            return;
+        }
+    };
+    
+    let mut pubsub = match client.get_async_connection().await {
+        Ok(conn) => conn.into_pubsub(),
+        Err(e) => {
+            tracing::error!("Failed to create pubsub connection: {}", e);
+            return;
+        }
+    };
+    
+    if let Err(e) = pubsub.subscribe("optimus:metrics:completions").await {
+        tracing::error!("Failed to subscribe to metrics channel: {}", e);
+        return;
+    }
+    
+    info!("Metrics subscriber started - listening for job completions");
+    
+    loop {
+        match pubsub.on_message().next().await {
+            Some(msg) => {
+                let payload: String = match msg.get_payload() {
+                    Ok(p) => p,
+                    Err(_) => continue,
+                };
+                
+                if let Ok(event) = serde_json::from_str::<serde_json::Value>(&payload) {
+                    let language = event["language"].as_str().unwrap_or("unknown");
+                    let status = event["status"].as_str().unwrap_or("unknown");
+                    let exec_time = event["execution_time_ms"].as_f64().unwrap_or(0.0);
+                    
+                    metrics::record_job_completed(language, status, exec_time);
+                    
+                    tracing::debug!(
+                        job_id = event["job_id"].as_str().unwrap_or("unknown"),
+                        language = language,
+                        status = status,
+                        "Recorded job completion metrics"
+                    );
+                }
+            }
+            None => break,
+        }
+    }
+}
+

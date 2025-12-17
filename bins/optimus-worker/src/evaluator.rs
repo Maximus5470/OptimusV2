@@ -323,6 +323,7 @@ mod tests {
                 },
             ],
             timeout_ms: 5000,
+            metadata: optimus_common::types::JobMetadata::default(),
         };
 
         let outputs = vec![
@@ -374,6 +375,7 @@ mod tests {
                 },
             ],
             timeout_ms: 5000,
+            metadata: optimus_common::types::JobMetadata::default(),
         };
 
         let outputs = vec![
@@ -415,6 +417,7 @@ mod tests {
                 make_test_case(2, "expected2", 10),
             ],
             timeout_ms: 5000,
+            metadata: optimus_common::types::JobMetadata::default(),
         };
 
         let outputs = vec![
@@ -444,6 +447,7 @@ mod tests {
                 weight: 10,
             }],
             timeout_ms: 5000,
+            metadata: optimus_common::types::JobMetadata::default(),
         };
 
         let outputs = vec![TestExecutionOutput {
@@ -475,6 +479,7 @@ mod tests {
                 weight: 5,
             }],
             timeout_ms: 1000,
+            metadata: optimus_common::types::JobMetadata::default(),
         };
 
         let outputs = vec![TestExecutionOutput {
@@ -506,6 +511,7 @@ mod tests {
                 weight: 10,
             }],
             timeout_ms: 5000,
+            metadata: optimus_common::types::JobMetadata::default(),
         };
 
         let outputs = vec![TestExecutionOutput {
@@ -532,6 +538,7 @@ mod tests {
             source_code: String::new(),
             test_cases: vec![make_test_case(1, "line1\nline2\nline3", 10)],
             timeout_ms: 5000,
+            metadata: optimus_common::types::JobMetadata::default(),
         };
 
         // Different newline styles should match after normalization
@@ -551,6 +558,7 @@ mod tests {
             source_code: String::new(),
             test_cases: vec![make_test_case(1, "", 5)],
             timeout_ms: 5000,
+            metadata: optimus_common::types::JobMetadata::default(),
         };
 
         let outputs = vec![make_output(1, "   \n", 5)];
@@ -569,6 +577,7 @@ mod tests {
             source_code: String::new(),
             test_cases: vec![make_test_case(1, "Hello", 10)],
             timeout_ms: 5000,
+            metadata: optimus_common::types::JobMetadata::default(),
         };
 
         let outputs = vec![make_output(1, "hello", 10)];
@@ -593,6 +602,7 @@ mod tests {
                 make_test_case(4, "error", 10),
             ],
             timeout_ms: 1000,
+            metadata: optimus_common::types::JobMetadata::default(),
         };
 
         let outputs = vec![
@@ -642,6 +652,7 @@ mod tests {
                 },
             ],
             timeout_ms: 5000,
+            metadata: optimus_common::types::JobMetadata::default(),
         };
 
         let outputs = vec![make_output(1, "output", 10)];
@@ -666,6 +677,7 @@ mod tests {
                 make_test_case(2, "world", 25),
             ],
             timeout_ms: 5000,
+            metadata: optimus_common::types::JobMetadata::default(),
         };
 
         let outputs = vec![

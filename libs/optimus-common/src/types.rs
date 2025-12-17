@@ -12,6 +12,26 @@ pub enum Language {
     Rust,
 }
 
+/// Job Metadata for Retry and Failure Handling
+/// Tracks retry attempts and failure information
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct JobMetadata {
+    pub attempts: u8,
+    pub max_attempts: u8,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_failure_reason: Option<String>,
+}
+
+impl Default for JobMetadata {
+    fn default() -> Self {
+        Self {
+            attempts: 0,
+            max_attempts: 3,
+            last_failure_reason: None,
+        }
+    }
+}
+
 /// Test Case Definition (Immutable Input)
 /// Test cases are immutable - workers must not mutate them
 /// Ordering matters - execution is sequential
@@ -21,6 +41,25 @@ pub struct TestCase {
     pub input: String,
     pub expected_output: String,
     pub weight: u32, // for scoring
+}
+
+impl Language {
+    /// Returns all language variants
+    /// This is the single source of truth for available languages
+    /// Add new languages here and they'll automatically propagate everywhere
+    pub fn all_variants() -> &'static [Language] {
+        &[Language::Python, Language::Java, Language::Rust]
+    }
+    
+    /// Parse a language from string (case-insensitive)
+    pub fn from_str(s: &str) -> Option<Language> {
+        match s.to_lowercase().as_str() {
+            "python" => Some(Language::Python),
+            "java" => Some(Language::Java),
+            "rust" => Some(Language::Rust),
+            _ => None,
+        }
+    }
 }
 
 impl fmt::Display for Language {
@@ -48,6 +87,8 @@ pub struct JobRequest {
     pub source_code: String,
     pub test_cases: Vec<TestCase>,
     pub timeout_ms: u64,
+    #[serde(default)]
+    pub metadata: JobMetadata,
 }
 
 /// Job State Machine
@@ -139,6 +180,7 @@ mod tests {
             source_code: "public class Main {}".to_string(),
             test_cases,
             timeout_ms: 5000,
+            metadata: JobMetadata::default(),
         };
         
         let json = serde_json::to_string(&job).unwrap();
@@ -216,5 +258,27 @@ mod tests {
         let failed = TestStatus::Failed;
         let json = serde_json::to_string(&failed).unwrap();
         assert_eq!(json, "\"failed\"");
+    }
+    
+    #[test]
+    fn test_language_all_variants() {
+        let variants = Language::all_variants();
+        assert_eq!(variants.len(), 3);
+        assert!(variants.contains(&Language::Python));
+        assert!(variants.contains(&Language::Java));
+        assert!(variants.contains(&Language::Rust));
+    }
+    
+    #[test]
+    fn test_language_from_str() {
+        assert_eq!(Language::from_str("python"), Some(Language::Python));
+        assert_eq!(Language::from_str("Python"), Some(Language::Python));
+        assert_eq!(Language::from_str("PYTHON"), Some(Language::Python));
+        
+        assert_eq!(Language::from_str("java"), Some(Language::Java));
+        assert_eq!(Language::from_str("rust"), Some(Language::Rust));
+        
+        assert_eq!(Language::from_str("javascript"), None);
+        assert_eq!(Language::from_str(""), None);
     }
 }

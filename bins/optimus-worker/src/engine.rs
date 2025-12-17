@@ -159,43 +159,6 @@ impl DockerEngine {
         }
     }
 
-    /// Old implementation - kept for reference
-    fn _get_execution_command_old(&self, language: &Language) -> Vec<String> {
-        // Try config manager first, fallback to hardcoded values
-        if let Some(ref config) = self.config_manager {
-            if let Ok(cmd) = config.get_command(language) {
-                // Add file path to command
-                let file_ext = config.get_file_extension(language)
-                    .unwrap_or_else(|_| {
-                        // Fallback file extensions
-                        match language {
-                            Language::Python => ".py".to_string(),
-                            Language::Java => ".java".to_string(),
-                            Language::Rust => ".rs".to_string(),
-                        }
-                    });
-                let filename = format!("/code/main{}", file_ext);
-                
-                let mut full_cmd = cmd;
-                // For Python, add -u and filename
-                if matches!(language, Language::Python) {
-                    full_cmd.push(filename);
-                } else {
-                    // For other languages, append filename if needed
-                    full_cmd.push(filename);
-                }
-                return full_cmd;
-            }
-        }
-        
-        // Fallback to hardcoded defaults
-        match language {
-            Language::Python => vec!["python".to_string(), "-u".to_string(), "/code/main.py".to_string()],
-            Language::Java => vec!["java".to_string(), "Main".to_string()],
-            Language::Rust => vec!["/code/main".to_string()],
-        }
-    }
-
     /// Get memory limit for a language
     fn get_memory_limit(&self, language: &Language) -> i64 {
         if let Some(ref config) = self.config_manager {

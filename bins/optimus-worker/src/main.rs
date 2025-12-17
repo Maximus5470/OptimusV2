@@ -38,13 +38,15 @@ async fn main() -> anyhow::Result<()> {
     let language_str = std::env::var("WORKER_LANGUAGE")
         .unwrap_or_else(|_| "python".to_string());
     
-    let language = match language_str.to_lowercase().as_str() {
-        "python" => Language::Python,
-        "java" => Language::Java,
-        "rust" => Language::Rust,
-        _ => {
+    let language = match Language::from_str(&language_str) {
+        Some(lang) => lang,
+        None => {
             error!("Invalid language: {}", language_str);
-            error!("Valid options: python, java, rust");
+            let valid_languages: Vec<String> = Language::all_variants()
+                .iter()
+                .map(|l| l.to_string())
+                .collect();
+            error!("Valid options: {}", valid_languages.join(", "));
             std::process::exit(1);
         }
     };
@@ -72,11 +74,13 @@ async fn main() -> anyhow::Result<()> {
     let mut redis_conn = ::redis::aio::ConnectionManager::new(client).await?;
     
     info!("Connected to Redis: {}", redis_url);
+    info!("Worker is READY - waiting for jobs from queue: {}", queue_name);
 
     // Setup graceful shutdown
     let shutdown = async {
         signal::ctrl_c().await.expect("failed to install CTRL+C signal handler");
-        warn!("Received shutdown signal, draining queue...");
+        warn!("⚠️  Received SIGTERM/CTRL+C - initiating graceful shutdown");
+        warn!("Worker will finish current job and exit");
     };
 
     tokio::select! {
@@ -84,7 +88,7 @@ async fn main() -> anyhow::Result<()> {
         _ = shutdown => {},
     }
 
-    info!("Worker shutdown complete");
+    info!("✓ Worker shutdown complete - all jobs processed");
     Ok(())
 }
 
@@ -95,9 +99,13 @@ async fn worker_loop(
     config_manager: &LanguageConfigManager,
 ) -> anyhow::Result<()> {
     loop {
+        // Log idle state (waiting for jobs)
+        debug!("Worker IDLE - waiting for job from queue");
+        
         // BLPOP with 5 second timeout for graceful shutdown
-        match redis::pop_job(redis_conn, language, 5.0).await {
-            Ok(Some(job)) => {
+        // Consumes from both main queue and retry queue (main has priority)
+        match redis::pop_job_with_retry(redis_conn, language, 5.0).await {
+            Ok(Some(mut job)) => {
                 let job_id = job.id;
                 info!(
                     job_id = %job_id,
@@ -105,7 +113,8 @@ async fn worker_loop(
                     timeout_ms = job.timeout_ms,
                     test_cases = job.test_cases.len(),
                     source_size = job.source_code.len(),
-                    "Received job"
+                    phase = "dequeued",
+                    "Worker BUSY - processing job"
                 );
                 
                 // Display language-specific configuration
@@ -120,11 +129,82 @@ async fn worker_loop(
                 }
                 
                 // Execute job with Docker executor
+                info!(
+                    job_id = %job_id, 
+                    phase = "executing",
+                    attempt = job.metadata.attempts + 1,
+                    max_attempts = job.metadata.max_attempts,
+                    "Starting execution"
+                );
                 let start = std::time::Instant::now();
                 let result = match executor::execute_docker(&job, config_manager).await {
                     Ok(result) => result,
                     Err(e) => {
-                        error!(job_id = %job_id, error = %e, "Docker execution failed");
+                        error!(
+                            job_id = %job_id, 
+                            phase = "execution_failed", 
+                            error = %e,
+                            attempts = job.metadata.attempts,
+                            "Docker execution failed"
+                        );
+                        
+                        // Increment attempts
+                        job.metadata.attempts += 1;
+                        job.metadata.last_failure_reason = Some(format!("Execution error: {}", e));
+                        
+                        // Retry logic
+                        if job.metadata.attempts < job.metadata.max_attempts {
+                            warn!(
+                                job_id = %job_id,
+                                attempt = job.metadata.attempts,
+                                max_attempts = job.metadata.max_attempts,
+                                "Job failed, sending to retry queue"
+                            );
+                            
+                            if let Err(retry_err) = redis::push_to_retry_queue(redis_conn, &job).await {
+                                error!(
+                                    job_id = %job_id,
+                                    error = %retry_err,
+                                    "Failed to push job to retry queue"
+                                );
+                            } else {
+                                info!(job_id = %job_id, "Job pushed to retry queue");
+                            }
+                        } else {
+                            error!(
+                                job_id = %job_id,
+                                attempts = job.metadata.attempts,
+                                "Job exceeded max attempts, sending to DLQ"
+                            );
+                            
+                            if let Err(dlq_err) = redis::push_to_dlq(redis_conn, &job).await {
+                                error!(
+                                    job_id = %job_id,
+                                    error = %dlq_err,
+                                    "Failed to push job to DLQ"
+                                );
+                            } else {
+                                info!(job_id = %job_id, "Job pushed to DLQ");
+                            }
+                            
+                            // Store final failed result
+                            let failed_result = optimus_common::types::ExecutionResult {
+                                job_id: job.id,
+                                overall_status: optimus_common::types::JobStatus::Failed,
+                                score: 0,
+                                max_score: job.test_cases.iter().map(|tc| tc.weight).sum(),
+                                results: vec![],
+                            };
+                            
+                            if let Err(store_err) = redis::store_result_with_metrics(redis_conn, &failed_result, &job.language).await {
+                                error!(
+                                    job_id = %job_id,
+                                    error = %store_err,
+                                    "Failed to store failed result"
+                                );
+                            }
+                        }
+                        
                         continue;
                     }
                 };
@@ -132,6 +212,7 @@ async fn worker_loop(
                 
                 info!(
                     job_id = %job_id,
+                    phase = "evaluated",
                     status = ?result.overall_status,
                     score = result.score,
                     max_score = result.max_score,
@@ -150,19 +231,22 @@ async fn worker_loop(
                     );
                 }
                 
-                // Persist result to Redis
-                match redis::store_result(redis_conn, &result).await {
+                // Persist result to Redis with metrics
+                info!(job_id = %job_id, phase = "persisting", "Storing result to Redis");
+                match redis::store_result_with_metrics(redis_conn, &result, &job.language).await {
                     Ok(_) => {
-                        info!(job_id = %job_id, "Result persisted to Redis");
+                        info!(job_id = %job_id, phase = "completed", "Result persisted to Redis");
                     }
                     Err(e) => {
-                        error!(job_id = %job_id, error = %e, "Failed to persist result");
+                        error!(job_id = %job_id, phase = "persist_failed", error = %e, "Failed to persist result");
                         // Non-fatal - worker continues
                     }
                 }
+                
+                info!(job_id = %job_id, phase = "done", "Worker IDLE - job completed");
             }
             Ok(None) => {
-                // Timeout - check for shutdown
+                // Timeout - check for shutdown (idle continues)
                 continue;
             }
             Err(e) => {
