@@ -7,12 +7,103 @@ use optimus_common::redis;
 use optimus_common::types::Language;
 use optimus_common::config::WorkerConfig;
 use tokio::signal;
-use tokio::sync::Semaphore;
+use tokio::sync::{Semaphore, RwLock};
 use std::sync::Arc;
 use config::LanguageConfigManager;
 use tracing::{info, error, warn, debug, instrument};
 use bollard::{Docker, image::CreateImageOptions};
 use futures_util::stream::StreamExt;
+use axum::{
+    extract::State,
+    response::{IntoResponse, Json},
+    routing::get,
+    Router,
+    http::StatusCode,
+};
+use tokio::net::TcpListener;
+use serde::Serialize;
+
+/// Shared worker state for health checks
+#[derive(Clone)]
+struct WorkerState {
+    redis_url: String,
+    is_executing: Arc<RwLock<bool>>,
+}
+
+#[derive(Serialize)]
+struct HealthResponse {
+    status: String,
+    executing_job: bool,
+}
+
+/// Liveness probe - simple process alive check
+async fn health_handler(State(state): State<WorkerState>) -> impl IntoResponse {
+    let executing = *state.is_executing.read().await;
+    (
+        StatusCode::OK,
+        Json(HealthResponse {
+            status: "healthy".to_string(),
+            executing_job: executing,
+        })
+    )
+}
+
+/// Readiness probe - checks Redis connectivity and execution state
+async fn ready_handler(State(state): State<WorkerState>) -> impl IntoResponse {
+    // Check Redis connectivity
+    let redis_ok = match ::redis::Client::open(state.redis_url.as_str()) {
+        Ok(client) => {
+            match client.get_async_connection().await {
+                Ok(mut conn) => {
+                    ::redis::cmd("PING")
+                        .query_async::<_, String>(&mut conn)
+                        .await
+                        .is_ok()
+                }
+                Err(_) => false,
+            }
+        }
+        Err(_) => false,
+    };
+
+    let executing = *state.is_executing.read().await;
+    
+    // Worker is ready if Redis is reachable AND not currently executing
+    // This allows KEDA to scale down idle workers safely
+    let is_ready = redis_ok && !executing;
+    
+    let status_code = if is_ready {
+        StatusCode::OK
+    } else {
+        StatusCode::SERVICE_UNAVAILABLE
+    };
+
+    (
+        status_code,
+        Json(HealthResponse {
+            status: if is_ready { "ready".to_string() } else { "not_ready".to_string() },
+            executing_job: executing,
+        })
+    )
+}
+
+/// Start health check HTTP server
+async fn start_health_server(state: WorkerState) -> anyhow::Result<()> {
+    let app = Router::new()
+        .route("/health", get(health_handler))
+        .route("/ready", get(ready_handler))
+        .with_state(state);
+
+    let port = std::env::var("HEALTH_PORT")
+        .unwrap_or_else(|_| "8080".to_string());
+    let addr = format!("0.0.0.0:{}", port);
+    
+    let listener = TcpListener::bind(&addr).await?;
+    info!("Health server listening on {}", addr);
+    
+    axum::serve(listener, app).await?;
+    Ok(())
+}
 
 /// Pre-pull a Docker image (best-effort)
 /// Returns Ok(true) if image was pulled, Ok(false) if already present
@@ -182,15 +273,49 @@ async fn main() -> anyhow::Result<()> {
     let semaphore = Arc::new(Semaphore::new(worker_config.max_parallel_jobs));
     info!("Concurrency semaphore initialized with {} permits", worker_config.max_parallel_jobs);
 
-    // Setup graceful shutdown
+    // Create shared state for health checks
+    let is_executing = Arc::new(RwLock::new(false));
+    let health_state = WorkerState {
+        redis_url: redis_url.clone(),
+        is_executing: is_executing.clone(),
+    };
+
+    // Start health check server in background
+    tokio::spawn(async move {
+        if let Err(e) = start_health_server(health_state).await {
+            error!("Health server error: {}", e);
+        }
+    });
+
+    // Setup graceful shutdown - handles both SIGTERM (Kubernetes) and SIGINT (CTRL+C)
     let shutdown = async {
-        signal::ctrl_c().await.expect("failed to install CTRL+C signal handler");
-        warn!("⚠️  Received SIGTERM/CTRL+C - initiating graceful shutdown");
-        warn!("Worker will finish current job and exit");
+        #[cfg(unix)]
+        {
+            use tokio::signal::unix::{signal, SignalKind};
+            let mut sigterm = signal(SignalKind::terminate())
+                .expect("failed to install SIGTERM signal handler");
+            let mut sigint = signal(SignalKind::interrupt())
+                .expect("failed to install SIGINT signal handler");
+            
+            tokio::select! {
+                _ = sigterm.recv() => {
+                    warn!("⚠️  Received SIGTERM - initiating graceful shutdown");
+                }
+                _ = sigint.recv() => {
+                    warn!("⚠️  Received SIGINT (CTRL+C) - initiating graceful shutdown");
+                }
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            signal::ctrl_c().await.expect("failed to install CTRL+C signal handler");
+            warn!("⚠️  Received CTRL+C - initiating graceful shutdown");
+        }
+        warn!("Worker will finish current job and exit cleanly");
     };
 
     tokio::select! {
-        _ = worker_loop(&mut redis_conn, &language, &config_manager, semaphore) => {},
+        _ = worker_loop(&mut redis_conn, &language, &config_manager, semaphore, is_executing) => {},
         _ = shutdown => {},
     }
 
@@ -198,12 +323,13 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-#[instrument(skip(redis_conn, config_manager, semaphore), fields(language = %language))]
+#[instrument(skip(redis_conn, config_manager, semaphore, is_executing), fields(language = %language))]
 async fn worker_loop(
     redis_conn: &mut ::redis::aio::ConnectionManager,
     language: &Language,
     config_manager: &LanguageConfigManager,
     semaphore: Arc<Semaphore>,
+    is_executing: Arc<RwLock<bool>>,
 ) -> anyhow::Result<()> {
     loop {
         // Log idle state (waiting for jobs)
@@ -308,6 +434,10 @@ async fn worker_loop(
                             info!(job_id = %job_id, "Cancelled result stored");
                         }
                         
+                        // MARK: Worker as idle (job was cancelled)
+                        *is_executing.write().await = false;
+                        drop(permit);
+                        
                         continue;
                     }
                     Ok(false) => {
@@ -321,6 +451,9 @@ async fn worker_loop(
                         );
                     }
                 }
+                
+                // MARK: Worker as executing (for readiness probe)
+                *is_executing.write().await = true;
                 
                 // Execute job with Docker executor
                 info!(
@@ -399,6 +532,10 @@ async fn worker_loop(
                             }
                         }
                         
+                        // MARK: Worker as idle (execution failed)
+                        *is_executing.write().await = false;
+                        drop(permit);
+                        
                         continue;
                     }
                 };
@@ -443,6 +580,9 @@ async fn worker_loop(
                     available_permits = semaphore.available_permits() + 1,
                     "Worker IDLE - job completed, permit released"
                 );
+                
+                // MARK: Worker as idle (for readiness probe)
+                *is_executing.write().await = false;
                 
                 // Permit is automatically released when dropped here
                 drop(permit);

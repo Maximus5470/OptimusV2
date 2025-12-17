@@ -1,6 +1,7 @@
 mod handlers;
 mod routes;
 mod metrics;
+mod language_config;
 
 use axum::Router;
 use futures_util::StreamExt;
@@ -13,6 +14,7 @@ use tracing::info;
 pub struct AppState {
     pub redis: ConnectionManager,
     pub start_time: Arc<std::time::Instant>,
+    pub language_registry: Arc<language_config::LanguageRegistry>,
 }
 
 #[tokio::main]
@@ -44,9 +46,25 @@ async fn main() {
     
     info!("Connected to Redis: {}", redis_url);
 
+    // Load language configuration
+    let config_path = std::env::var("LANGUAGE_CONFIG_PATH")
+        .unwrap_or_else(|_| "config/languages.json".to_string());
+    
+    let language_registry = language_config::LanguageRegistry::load_from_file(&config_path)
+        .unwrap_or_else(|e| {
+            panic!("Failed to load language configuration from {}: {}", config_path, e);
+        });
+    
+    let enabled_langs: Vec<String> = language_registry.enabled_languages()
+        .iter()
+        .map(|l| l.to_string())
+        .collect();
+    info!("Loaded language configuration: enabled languages = {:?}", enabled_langs);
+
     let state = Arc::new(AppState {
         redis: redis_conn.clone(),
         start_time: Arc::new(std::time::Instant::now()),
+        language_registry: Arc::new(language_registry),
     });
 
     // Start background metrics subscriber
@@ -58,8 +76,10 @@ async fn main() {
         .with_state(state);
 
     // Start server
-    let addr = "0.0.0.0:3000";
-    let listener = TcpListener::bind(addr).await
+    let port = std::env::var("PORT")
+        .unwrap_or_else(|_| "8080".to_string());
+    let addr = format!("0.0.0.0:{}", port);
+    let listener = TcpListener::bind(&addr).await
         .expect("Failed to bind to address");
     
     info!("HTTP server listening on {}", addr);

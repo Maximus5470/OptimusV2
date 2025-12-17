@@ -3,6 +3,7 @@ use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LanguageExecution {
@@ -44,6 +45,7 @@ pub async fn add_language(
     queue: Option<&str>,
     memory: u32,
     cpu: f32,
+    build_docker: bool,
 ) -> Result<()> {
     println!("🚀 Adding language: {}", name);
 
@@ -80,16 +82,27 @@ pub async fn add_language(
     generate_keda_scaledobject(&keda_path, name, queue)?;
 
     // Step 4: Generate runner script if needed
-    if matches!(name, "python" | "java" | "cpp" | "go") {
+    if matches!(name, "python" | "java" | "rust" | "cpp" | "go") {
         println!("📜 Generating runner script...");
         generate_runner_script(&dockerfile_dir, name)?;
     }
 
     println!("✅ Language '{}' added successfully!", name);
+
+    // Step 5: Build Docker image if requested
+    if build_docker {
+        println!("\n🔨 Building Docker image...");
+        build_docker_image(name, false).await?;
+    } else {
+        println!("\n⏭️  Skipping Docker build (use --build-docker=true to build)");
+    }
+
     println!("\n📋 Next steps:");
-    println!("  1. Build Docker image: docker build -t optimus-{}:latest -f {} .", name, dockerfile_path.display());
-    println!("  2. Apply KEDA ScaledObject: kubectl apply -f {}", keda_path.display());
-    println!("  3. Deploy worker for {}: Update worker-deployment.yaml with language filter", name);
+    if !build_docker {
+        println!("  1. Build Docker image: optimus-cli build-image --name {}", name);
+    }
+    println!("  {}. Apply KEDA ScaledObject: kubectl apply -f {}", if build_docker { 1 } else { 2 }, keda_path.display());
+    println!("  {}. Deploy worker for {}: Update worker-deployment.yaml with language filter", if build_docker { 2 } else { 3 }, name);
 
     Ok(())
 }
@@ -178,6 +191,7 @@ fn generate_dockerfile(
     let dockerfile_content = match name {
         "python" => generate_python_dockerfile(version),
         "java" => generate_java_dockerfile(version),
+        "rust" => generate_rust_dockerfile(version),
         "cpp" => generate_cpp_dockerfile(version),
         "go" => generate_go_dockerfile(version),
         "javascript" | "node" => generate_node_dockerfile(version),
@@ -301,6 +315,42 @@ CMD ["node"]
     )
 }
 
+/// Generate Rust Dockerfile
+fn generate_rust_dockerfile(version: &str) -> String {
+    format!(
+        r#"# Rust Execution Environment - Optimized for Code Execution
+FROM rust:{}-slim
+
+# Set environment variables for performance
+ENV CARGO_HOME=/usr/local/cargo \
+    RUSTUP_HOME=/usr/local/rustup \
+    PATH=/usr/local/cargo/bin:$PATH \
+    RUSTFLAGS="-C opt-level=2 -C debuginfo=0"
+
+WORKDIR /code
+
+# Install required packages
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy runner script
+COPY runner.sh /code/runner.sh
+RUN chmod +x /code/runner.sh
+
+# Create non-root user for security
+RUN useradd -m -u 1000 optimus && \
+    chown -R optimus:optimus /code
+
+USER optimus
+
+# Set entrypoint to runner script
+ENTRYPOINT ["/code/runner.sh"]
+"#,
+        version
+    )
+}
+
 /// Generate KEDA ScaledObject YAML
 fn generate_keda_scaledobject(
     keda_path: &Path,
@@ -351,6 +401,43 @@ spec:
 /// Generate language-specific runner script
 fn generate_runner_script(dockerfile_dir: &Path, name: &str) -> Result<()> {
     match name {
+        "rust" => {
+            let runner_path = dockerfile_dir.join("runner.sh");
+            let runner_content = r#"#!/bin/bash
+# Optimus Rust Runner
+# Executes Rust code with given input and captures output
+
+set -e
+
+# Read source code from environment (base64 encoded)
+SOURCE_CODE_B64="${SOURCE_CODE:-}"
+TEST_INPUT_B64="${TEST_INPUT:-}"
+
+if [ -z "$SOURCE_CODE_B64" ]; then
+    echo "Error: SOURCE_CODE environment variable not set" >&2
+    exit 1
+fi
+
+# Decode source code and input
+SOURCE_CODE=$(echo "$SOURCE_CODE_B64" | base64 -d)
+TEST_INPUT=$(echo "$TEST_INPUT_B64" | base64 -d)
+
+# Write source code to file
+echo "$SOURCE_CODE" > /code/main.rs
+
+# Compile the Rust code
+rustc /code/main.rs -o /code/main 2>&1
+
+if [ $? -ne 0 ]; then
+    echo "Compilation failed" >&2
+    exit 1
+fi
+
+# Execute with test input
+echo "$TEST_INPUT" | /code/main
+"#;
+            fs::write(runner_path, runner_content)?;
+        }
         "python" => {
             let runner_path = dockerfile_dir.join("runner.py");
             let runner_content = r#"#!/usr/bin/env python3
@@ -451,6 +538,95 @@ pub async fn init_project(path: &str) -> Result<()> {
     println!("  1. Add a language: optimus-cli add-lang --name python --ext py");
     println!("  2. Configure Redis and API settings");
     println!("  3. Deploy to Kubernetes");
+    
+    Ok(())
+}
+
+/// Build Docker image for a language
+pub async fn build_docker_image(name: &str, no_cache: bool) -> Result<()> {
+    println!("🐳 Building Docker image for: {}", name);
+    
+    // Read languages.json to get version info
+    let config_path = Path::new("config/languages.json");
+    if !config_path.exists() {
+        bail!("config/languages.json not found. Have you added the language yet?");
+    }
+    
+    let content = fs::read_to_string(config_path)
+        .context("Failed to read languages.json")?;
+    let languages_json: LanguagesJson = serde_json::from_str(&content)
+        .context("Failed to parse languages.json")?;
+    
+    let lang_config = languages_json.languages.iter()
+        .find(|l| l.name == name)
+        .ok_or_else(|| anyhow::anyhow!("Language '{}' not found in config", name))?;
+    
+    let dockerfile_dir = PathBuf::from(format!("dockerfiles/{}", name));
+    let dockerfile_path = dockerfile_dir.join("Dockerfile");
+    
+    if !dockerfile_path.exists() {
+        bail!("Dockerfile not found at {}. Generate it first with add-lang command.", dockerfile_path.display());
+    }
+    
+    // Build image tags
+    let image_versioned = format!("optimus-{}:{}-v1", name, lang_config.version);
+    let image_latest = format!("optimus-{}:latest", name);
+    
+    println!("📦 Building tags:");
+    println!("  - {}", image_versioned);
+    println!("  - {}", image_latest);
+    println!("📂 Context: {}", dockerfile_dir.display());
+    println!("📄 Dockerfile: {}", dockerfile_path.display());
+    
+    // Build docker command
+    let mut docker_args = vec![
+        "build".to_string(),
+        "-t".to_string(),
+        image_versioned.clone(),
+        "-t".to_string(),
+        image_latest.clone(),
+        "-f".to_string(),
+        dockerfile_path.to_string_lossy().to_string(),
+    ];
+    
+    if no_cache {
+        docker_args.push("--no-cache".to_string());
+    }
+    
+    docker_args.push(dockerfile_dir.to_string_lossy().to_string());
+    
+    println!("\n🔨 Running: docker {}", docker_args.join(" "));
+    println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n");
+    
+    // Execute docker build
+    let status = Command::new("docker")
+        .args(&docker_args)
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .status()
+        .context("Failed to execute docker build. Is Docker installed and running?")?;
+    
+    if !status.success() {
+        bail!("Docker build failed with exit code: {:?}", status.code());
+    }
+    
+    println!("\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+    println!("✅ Docker image built successfully!");
+    println!("\n📦 Available images:");
+    println!("  - {}", image_versioned);
+    println!("  - {}", image_latest);
+    
+    // Verify images exist
+    println!("\n🔍 Verifying images...");
+    let verify_status = Command::new("docker")
+        .args(&["images", &image_latest, "--format", "{{.Repository}}:{{.Tag}}"])
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .status();
+    
+    if verify_status.is_ok() {
+        println!("✅ Image verification complete!");
+    }
     
     Ok(())
 }

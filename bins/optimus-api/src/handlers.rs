@@ -2,7 +2,7 @@
 
 use axum::{
     extract::{State, Path},
-    http::StatusCode,
+    http::{StatusCode, HeaderMap},
     response::{IntoResponse, Json},
 };
 use optimus_common::types::{JobRequest, Language};
@@ -10,12 +10,12 @@ use optimus_common::redis;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use uuid::Uuid;
-use tracing::{info, error};
+use tracing::{info, error, warn};
 
 use crate::AppState;
 use crate::metrics;
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct SubmitRequest {
     pub language: Language,
     pub source_code: String,
@@ -24,7 +24,7 @@ pub struct SubmitRequest {
     pub timeout_ms: u64,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct TestCaseInput {
     pub input: String,
     pub expected_output: String,
@@ -45,25 +45,129 @@ pub struct SubmitResponse {
     pub job_id: String,
 }
 
-// Safety limits
+// Safety limits (per specification)
 const MAX_TEST_CASES: usize = 100;
-const MAX_SOURCE_CODE_SIZE: usize = 100_000; // 100KB
-const MAX_INPUT_SIZE: usize = 10_000; // 10KB per test case input
-const MAX_EXPECTED_OUTPUT_SIZE: usize = 10_000; // 10KB per expected output
+const MAX_SOURCE_CODE_SIZE: usize = 256_000; // 256 KB
+const MAX_STDIN_SIZE: usize = 64_000; // 64 KB per test case input
+const MAX_EXPECTED_OUTPUT_SIZE: usize = 64_000; // 64 KB per expected output
+const MAX_TIMEOUT_MS: u64 = 60_000; // 60 seconds
+const MIN_TIMEOUT_MS: u64 = 1; // 1 millisecond
 
 #[derive(Debug, Serialize)]
 pub struct ErrorResponse {
-    pub error: String,
-    pub details: Option<String>,
+    pub error: ErrorDetail,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ErrorDetail {
+    pub code: String,
+    pub message: String,
 }
 
 /// POST /execute - Submit a job for execution
+/// 
+/// Supports idempotency via Idempotency-Key header
+/// - Same key + same payload → returns same job_id
+/// - Same key + different payload → returns 409 Conflict
 pub async fn submit_job(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Json(payload): Json<SubmitRequest>,
 ) -> impl IntoResponse {
+    // Extract idempotency key if provided
+    let idempotency_key = headers
+        .get("idempotency-key")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
+    
+    // 0. Validate language is enabled
+    if !state.language_registry.is_enabled(payload.language) {
+        metrics::record_job_rejected("language_not_supported");
+        error!(
+            language = %payload.language,
+            "Rejected: Language not supported or disabled"
+        );
+        return (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(ErrorResponse {
+                error: ErrorDetail {
+                    code: "LANGUAGE_NOT_SUPPORTED".to_string(),
+                    message: format!(
+                        "Language '{}' is not enabled or supported",
+                        payload.language
+                    ),
+                },
+            }),
+        ).into_response();
+    }
+    
+    // Handle idempotency if key is provided
+    if let Some(ref key) = idempotency_key {
+        let mut conn = state.redis.clone();
+        let idempotency_redis_key = format!("optimus:idempotency:{}", key);
+        
+        // Check if this key was used before using redis commands
+        match ::redis::cmd("GET")
+            .arg(&idempotency_redis_key)
+            .query_async::<_, Option<String>>(&mut conn)
+            .await
+        {
+            Ok(Some(stored_data)) => {
+                // Key exists - check if payload matches
+                let payload_json = serde_json::to_string(&payload).unwrap_or_default();
+                
+                if let Ok(stored) = serde_json::from_str::<serde_json::Value>(&stored_data) {
+                    if let Some(stored_payload) = stored.get("payload").and_then(|p| p.as_str()) {
+                        if stored_payload == payload_json {
+                            // Same payload - return existing job_id
+                            if let Some(job_id) = stored.get("job_id").and_then(|j| j.as_str()) {
+                                info!(
+                                    idempotency_key = %key,
+                                    job_id = %job_id,
+                                    "Idempotent request - returning existing job_id"
+                                );
+                                return (
+                                    StatusCode::ACCEPTED,
+                                    Json(SubmitResponse {
+                                        job_id: job_id.to_string(),
+                                    }),
+                                ).into_response();
+                            }
+                        } else {
+                            // Different payload with same key - conflict
+                            warn!(
+                                idempotency_key = %key,
+                                "Rejected: Same idempotency key with different payload"
+                            );
+                            metrics::record_job_rejected("idempotency_conflict");
+                            return (
+                                StatusCode::CONFLICT,
+                                Json(ErrorResponse {
+                                    error: ErrorDetail {
+                                        code: "IDEMPOTENCY_CONFLICT".to_string(),
+                                        message: "Same idempotency key used with different payload".to_string(),
+                                    },
+                                }),
+                            ).into_response();
+                        }
+                    }
+                }
+            }
+            Ok(None) => {
+                // Key doesn't exist - will store after creating job
+            }
+            Err(e) => {
+                error!(error = %e, "Failed to check idempotency key");
+                // Continue without idempotency on Redis errors
+            }
+        }
+    }
+    
     // Generate job ID
     let job_id = Uuid::new_v4();
+    
+    // Serialize payload early for idempotency check (before moving fields)
+    let payload_json_for_idempotency = serde_json::to_string(&payload).unwrap_or_default();
     
     // Safety checks - validate request before queueing
     
@@ -74,8 +178,10 @@ pub async fn submit_job(
         return (
             StatusCode::BAD_REQUEST,
             Json(ErrorResponse {
-                error: "Invalid request".to_string(),
-                details: Some("At least one test case is required".to_string()),
+                error: ErrorDetail {
+                    code: "NO_TEST_CASES".to_string(),
+                    message: "At least one test case is required".to_string(),
+                },
             }),
         ).into_response();
     }
@@ -91,12 +197,14 @@ pub async fn submit_job(
         return (
             StatusCode::BAD_REQUEST,
             Json(ErrorResponse {
-                error: "Too many test cases".to_string(),
-                details: Some(format!(
-                    "Maximum {} test cases allowed, got {}",
-                    MAX_TEST_CASES,
-                    payload.test_cases.len()
-                )),
+                error: ErrorDetail {
+                    code: "TOO_MANY_TEST_CASES".to_string(),
+                    message: format!(
+                        "Maximum {} test cases allowed, got {}",
+                        MAX_TEST_CASES,
+                        payload.test_cases.len()
+                    ),
+                },
             }),
         ).into_response();
     }
@@ -111,14 +219,16 @@ pub async fn submit_job(
             "Rejected: Source code too large"
         );
         return (
-            StatusCode::BAD_REQUEST,
+            StatusCode::PAYLOAD_TOO_LARGE,
             Json(ErrorResponse {
-                error: "Source code too large".to_string(),
-                details: Some(format!(
-                    "Maximum {} bytes allowed, got {} bytes",
-                    MAX_SOURCE_CODE_SIZE,
-                    payload.source_code.len()
-                )),
+                error: ErrorDetail {
+                    code: "SOURCE_CODE_TOO_LARGE".to_string(),
+                    message: format!(
+                        "Maximum {} bytes allowed, got {} bytes",
+                        MAX_SOURCE_CODE_SIZE,
+                        payload.source_code.len()
+                    ),
+                },
             }),
         ).into_response();
     }
@@ -130,32 +240,36 @@ pub async fn submit_job(
         return (
             StatusCode::BAD_REQUEST,
             Json(ErrorResponse {
-                error: "Invalid request".to_string(),
-                details: Some("Source code cannot be empty".to_string()),
+                error: ErrorDetail {
+                    code: "EMPTY_SOURCE_CODE".to_string(),
+                    message: "Source code cannot be empty".to_string(),
+                },
             }),
         ).into_response();
     }
     
     // 4. Check test case input/output sizes
     for (idx, tc) in payload.test_cases.iter().enumerate() {
-        if tc.input.len() > MAX_INPUT_SIZE {
+        if tc.input.len() > MAX_STDIN_SIZE {
             metrics::record_job_rejected("test_case_input_too_large");
             error!(
                 job_id = %job_id,
                 test_case = idx + 1,
                 size = tc.input.len(),
-                limit = MAX_INPUT_SIZE,
+                limit = MAX_STDIN_SIZE,
                 "Rejected: Test case input too large"
             );
             return (
-                StatusCode::BAD_REQUEST,
+                StatusCode::PAYLOAD_TOO_LARGE,
                 Json(ErrorResponse {
-                    error: "Test case input too large".to_string(),
-                    details: Some(format!(
-                        "Test case {} input exceeds {} bytes",
-                        idx + 1,
-                        MAX_INPUT_SIZE
-                    )),
+                    error: ErrorDetail {
+                        code: "TEST_CASE_INPUT_TOO_LARGE".to_string(),
+                        message: format!(
+                            "Test case {} input exceeds {} bytes",
+                            idx + 1,
+                            MAX_STDIN_SIZE
+                        ),
+                    },
                 }),
             ).into_response();
         }
@@ -170,21 +284,23 @@ pub async fn submit_job(
                 "Rejected: Test case expected output too large"
             );
             return (
-                StatusCode::BAD_REQUEST,
+                StatusCode::PAYLOAD_TOO_LARGE,
                 Json(ErrorResponse {
-                    error: "Test case expected output too large".to_string(),
-                    details: Some(format!(
-                        "Test case {} expected output exceeds {} bytes",
-                        idx + 1,
-                        MAX_EXPECTED_OUTPUT_SIZE
-                    )),
+                    error: ErrorDetail {
+                        code: "TEST_CASE_OUTPUT_TOO_LARGE".to_string(),
+                        message: format!(
+                            "Test case {} expected output exceeds {} bytes",
+                            idx + 1,
+                            MAX_EXPECTED_OUTPUT_SIZE
+                        ),
+                    },
                 }),
             ).into_response();
         }
     }
     
     // 5. Validate timeout
-    if payload.timeout_ms == 0 || payload.timeout_ms > 60_000 {
+    if payload.timeout_ms < MIN_TIMEOUT_MS || payload.timeout_ms > MAX_TIMEOUT_MS {
         metrics::record_job_rejected("invalid_timeout");
         error!(
             job_id = %job_id,
@@ -194,8 +310,14 @@ pub async fn submit_job(
         return (
             StatusCode::BAD_REQUEST,
             Json(ErrorResponse {
-                error: "Invalid timeout".to_string(),
-                details: Some("Timeout must be between 1ms and 60000ms".to_string()),
+                error: ErrorDetail {
+                    code: "INVALID_TIMEOUT".to_string(),
+                    message: format!(
+                        "Timeout must be between {}ms and {}ms",
+                        MIN_TIMEOUT_MS,
+                        MAX_TIMEOUT_MS
+                    ),
+                },
             }),
         ).into_response();
     }
@@ -227,6 +349,33 @@ pub async fn submit_job(
     let mut conn = state.redis.clone();
     match redis::push_job(&mut conn, &job).await {
         Ok(_) => {
+            // Store idempotency key if provided
+            if let Some(ref key) = idempotency_key {
+                let idempotency_redis_key = format!("optimus:idempotency:{}", key);
+                let idempotency_data = serde_json::json!({
+                    "job_id": job_id.to_string(),
+                    "payload": payload_json_for_idempotency,
+                    "created_at": chrono::Utc::now().to_rfc3339(),
+                });
+                
+                // Store with 24 hour TTL using SETEX
+                let mut conn_for_idempotency = state.redis.clone();
+                if let Err(e) = ::redis::cmd("SETEX")
+                    .arg(&idempotency_redis_key)
+                    .arg(86400) // 24 hours
+                    .arg(idempotency_data.to_string())
+                    .query_async::<_, ()>(&mut conn_for_idempotency)
+                    .await
+                {
+                    error!(
+                        error = %e,
+                        idempotency_key = %key,
+                        "Failed to store idempotency key (job already queued)"
+                    );
+                    // Don't fail the request - job is already queued
+                }
+            }
+            
             // Record metrics
             metrics::record_job_submitted(&job.language.to_string());
             
@@ -235,11 +384,12 @@ pub async fn submit_job(
                 language = %job.language,
                 test_cases = job.test_cases.len(),
                 phase = "queued",
+                idempotency_key = ?idempotency_key,
                 "Job queued"
             );
             
             (
-                StatusCode::CREATED,
+                StatusCode::ACCEPTED,
                 Json(SubmitResponse {
                     job_id: job_id.to_string(),
                 }),
@@ -250,8 +400,10 @@ pub async fn submit_job(
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse {
-                    error: "Failed to queue job".to_string(),
-                    details: Some(e.to_string()),
+                    error: ErrorDetail {
+                        code: "QUEUE_FAILURE".to_string(),
+                        message: format!("Failed to queue job: {}", e),
+                    },
                 }),
             ).into_response()
         }
@@ -280,8 +432,24 @@ pub async fn metrics_handler(State(state): State<Arc<AppState>>) -> impl IntoRes
     )
 }
 
-/// GET /health - Enhanced health check endpoint
+/// GET /health - Liveness probe (process alive check)
+/// Returns 200 if the process is running
 pub async fn health_check(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let uptime = state.start_time.elapsed().as_secs();
+    
+    let response = HealthResponse {
+        status: "healthy".to_string(),
+        uptime_seconds: uptime,
+        redis_connected: true, // We assume Redis is fine for liveness
+        timestamp: chrono::Utc::now().to_rfc3339(),
+    };
+
+    (StatusCode::OK, Json(response))
+}
+
+/// GET /ready - Readiness probe (Redis connectivity check)
+/// Returns 200 only if Redis is reachable
+pub async fn readiness_check(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let uptime = state.start_time.elapsed().as_secs();
     
     // Test Redis connectivity with PING
@@ -291,13 +459,13 @@ pub async fn health_check(State(state): State<Arc<AppState>>) -> impl IntoRespon
     {
         Ok(_) => true,
         Err(e) => {
-            error!(error = %e, "Redis health check failed");
+            error!(error = %e, "Redis readiness check failed");
             false
         }
     };
 
     let response = HealthResponse {
-        status: if redis_ok { "healthy".to_string() } else { "degraded".to_string() },
+        status: if redis_ok { "ready".to_string() } else { "not_ready".to_string() },
         uptime_seconds: uptime,
         redis_connected: redis_ok,
         timestamp: chrono::Utc::now().to_rfc3339(),
@@ -321,9 +489,12 @@ pub async fn get_job_result(
         Err(_) => {
             return (
                 StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({
-                    "error": "Invalid job ID format"
-                })),
+                Json(ErrorResponse {
+                    error: ErrorDetail {
+                        code: "INVALID_JOB_ID".to_string(),
+                        message: "Invalid job ID format".to_string(),
+                    },
+                }),
             ).into_response();
         }
     };
@@ -337,8 +508,9 @@ pub async fn get_job_result(
             (StatusCode::OK, Json(result)).into_response()
         }
         Ok(None) => {
-            info!(job_id = %job_id, "Job still pending");
-            // Result not found - job may still be queued/running
+            info!(job_id = %job_id, "Job still pending or not found");
+            // Result not found - job may still be queued/running (or doesn't exist)
+            // We return 202 optimistically to avoid expensive queue scans
             (
                 StatusCode::ACCEPTED,
                 Json(serde_json::json!({
@@ -352,9 +524,12 @@ pub async fn get_job_result(
             error!(job_id = %job_id, error = %e, "Failed to fetch job result");
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({
-                    "error": format!("Failed to query job status: {}", e)
-                })),
+                Json(ErrorResponse {
+                    error: ErrorDetail {
+                        code: "INTERNAL_ERROR".to_string(),
+                        message: format!("Failed to query job status: {}", e),
+                    },
+                }),
             ).into_response()
         }
     }
@@ -379,17 +554,18 @@ pub async fn get_job_debug(
     State(state): State<Arc<AppState>>,
     Path(job_id): Path<String>,
 ) -> impl IntoResponse {
-    use ::redis::AsyncCommands;
-    
     // Parse job ID
     let job_uuid = match Uuid::parse_str(&job_id) {
         Ok(id) => id,
         Err(_) => {
             return (
                 StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({
-                    "error": "Invalid job ID format"
-                })),
+                Json(ErrorResponse {
+                    error: ErrorDetail {
+                        code: "INVALID_JOB_ID".to_string(),
+                        message: "Invalid job ID format".to_string(),
+                    },
+                }),
             ).into_response();
         }
     };
@@ -403,9 +579,12 @@ pub async fn get_job_debug(
             error!(job_id = %job_id, error = %e, "Failed to fetch job result");
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({
-                    "error": format!("Failed to query job: {}", e)
-                })),
+                Json(ErrorResponse {
+                    error: ErrorDetail {
+                        code: "INTERNAL_ERROR".to_string(),
+                        message: format!("Failed to query job: {}", e),
+                    },
+                }),
             ).into_response();
         }
     };
@@ -420,7 +599,13 @@ pub async fn get_job_debug(
         let lang = language.to_string();
         // Check main queue
         let main_queue = format!("optimus:queue:{}", lang);
-        if let Ok(items) = conn.lrange::<_, Vec<String>>(&main_queue, 0, -1).await {
+        if let Ok(items) = ::redis::cmd("LRANGE")
+            .arg(&main_queue)
+            .arg(0)
+            .arg(-1)
+            .query_async::<_, Vec<String>>(&mut conn)
+            .await
+        {
             for item in items {
                 if let Ok(job) = serde_json::from_str::<optimus_common::types::JobRequest>(&item) {
                     if job.id == job_uuid {
@@ -434,7 +619,13 @@ pub async fn get_job_debug(
         
         // Check retry queue
         let retry_queue = format!("optimus:queue:{}:retry", lang);
-        if let Ok(items) = conn.lrange::<_, Vec<String>>(&retry_queue, 0, -1).await {
+        if let Ok(items) = ::redis::cmd("LRANGE")
+            .arg(&retry_queue)
+            .arg(0)
+            .arg(-1)
+            .query_async::<_, Vec<String>>(&mut conn)
+            .await
+        {
             for item in items {
                 if let Ok(job) = serde_json::from_str::<optimus_common::types::JobRequest>(&item) {
                     if job.id == job_uuid {
@@ -448,7 +639,13 @@ pub async fn get_job_debug(
         
         // Check DLQ
         let dlq = format!("optimus:queue:{}:dlq", lang);
-        if let Ok(items) = conn.lrange::<_, Vec<String>>(&dlq, 0, -1).await {
+        if let Ok(items) = ::redis::cmd("LRANGE")
+            .arg(&dlq)
+            .arg(0)
+            .arg(-1)
+            .query_async::<_, Vec<String>>(&mut conn)
+            .await
+        {
             for item in items {
                 if let Ok(job) = serde_json::from_str::<optimus_common::types::JobRequest>(&item) {
                     if job.id == job_uuid {
@@ -458,6 +655,10 @@ pub async fn get_job_debug(
                     }
                 }
             }
+        }
+        
+        if in_main_queue || in_retry_queue || in_dlq {
+            break;
         }
     }
     
@@ -512,9 +713,12 @@ pub async fn cancel_job(
         Err(_) => {
             return (
                 StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({
-                    "error": "Invalid job ID format"
-                })),
+                Json(ErrorResponse {
+                    error: ErrorDetail {
+                        code: "INVALID_JOB_ID".to_string(),
+                        message: "Invalid job ID format".to_string(),
+                    },
+                }),
             ).into_response();
         }
     };
@@ -555,9 +759,12 @@ pub async fn cancel_job(
             error!(job_id = %job_id, error = %e, "Failed to check job status");
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({
-                    "error": format!("Failed to query job: {}", e)
-                })),
+                Json(ErrorResponse {
+                    error: ErrorDetail {
+                        code: "INTERNAL_ERROR".to_string(),
+                        message: format!("Failed to query job: {}", e),
+                    },
+                }),
             ).into_response();
         }
     }
@@ -581,9 +788,12 @@ pub async fn cancel_job(
             error!(job_id = %job_id, error = %e, "Failed to set cancellation flag");
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({
-                    "error": format!("Failed to cancel job: {}", e)
-                })),
+                Json(ErrorResponse {
+                    error: ErrorDetail {
+                        code: "INTERNAL_ERROR".to_string(),
+                        message: format!("Failed to cancel job: {}", e),
+                    },
+                }),
             ).into_response()
         }
     }

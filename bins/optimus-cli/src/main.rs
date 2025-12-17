@@ -46,6 +46,21 @@ enum Commands {
         /// CPU limit
         #[arg(long, default_value = "0.5")]
         cpu: f32,
+
+        /// Build Docker image after adding language
+        #[arg(long, default_value = "true")]
+        build_docker: bool,
+    },
+
+    /// Build Docker image for a language
+    BuildImage {
+        /// Language name
+        #[arg(short, long)]
+        name: String,
+
+        /// Skip build cache
+        #[arg(long, default_value = "false")]
+        no_cache: bool,
     },
 
     /// Initialize a new Optimus project
@@ -70,6 +85,7 @@ async fn main() -> Result<()> {
             queue,
             memory,
             cpu,
+            build_docker,
         } => {
             commands::add_language(
                 &name,
@@ -80,7 +96,11 @@ async fn main() -> Result<()> {
                 queue.as_deref(),
                 memory,
                 cpu,
+                build_docker,
             ).await?;
+        }
+        Commands::BuildImage { name, no_cache } => {
+            commands::build_docker_image(&name, no_cache).await?;
         }
         Commands::Init { path } => {
             commands::init_project(&path).await?;

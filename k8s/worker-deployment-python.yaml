@@ -12,16 +12,25 @@ spec:
     matchLabels:
       app: optimus-worker-python
       language: python
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0  # Never kill pod during scale-down if it has jobs
+      maxSurge: 1        # Allow extra pods during updates
   template:
     metadata:
       labels:
         app: optimus-worker-python
         language: python
     spec:
+      terminationGracePeriodSeconds: 300  # 5 minutes for job completion
       containers:
       - name: optimus-worker
         image: optimus-worker:latest
         imagePullPolicy: IfNotPresent
+        ports:
+        - containerPort: 8080
+          name: health
         env:
         # ===== LANGUAGE BINDING (REQUIRED) =====
         - name: OPTIMUS_LANGUAGE
@@ -40,6 +49,8 @@ spec:
         # ===== LOGGING & OBSERVABILITY =====
         - name: RUST_LOG
           value: "info"
+        - name: HEALTH_PORT
+          value: "8080"
         
         # ===== DOCKER ENGINE =====
         - name: DOCKER_HOST
@@ -64,28 +75,25 @@ spec:
             cpu: "2000m"
         
         livenessProbe:
-          exec:
-            command:
-            - /bin/sh
-            - -c
-            - test -S /var/run/docker.sock
-          initialDelaySeconds: 10
+          httpGet:
+            path: /health
+            port: 8080
+          initialDelaySeconds: 15
           periodSeconds: 30
+          timeoutSeconds: 5
+          failureThreshold: 3
         
         readinessProbe:
-          exec:
-            command:
-            - /bin/sh
-            - -c
-            - test -S /var/run/docker.sock
-          initialDelaySeconds: 5
+          httpGet:
+            path: /ready
+            port: 8080
+          initialDelaySeconds: 10
           periodSeconds: 10
+          timeoutSeconds: 3
+          failureThreshold: 2
       
       volumes:
       - name: docker-sock
         hostPath:
           path: /var/run/docker.sock
           type: Socket
-      
-      # Graceful shutdown
-      terminationGracePeriodSeconds: 300  # 5 minutes for job completion
