@@ -16,7 +16,7 @@ spec:
       # Redis connection
       address: redis:6379
       # Queue name for Python jobs
-      listName: jobs:python
+      listName: optimus:queue:python
       # Scale up when queue has more than 5 items
       listLength: "5"
       # Use password if Redis is secured (optional)

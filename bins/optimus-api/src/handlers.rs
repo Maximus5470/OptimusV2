@@ -1,7 +1,7 @@
 // HTTP route handlers for the Optimus API
 
 use axum::{
-    extract::State,
+    extract::{State, Path},
     http::StatusCode,
     response::{IntoResponse, Json},
 };
@@ -10,6 +10,7 @@ use optimus_common::redis;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use uuid::Uuid;
+use tracing::{info, error};
 
 use crate::AppState;
 
@@ -77,11 +78,11 @@ pub async fn submit_job(
     let mut conn = state.redis.clone();
     match redis::push_job(&mut conn, &job).await {
         Ok(_) => {
-            println!(
-                "✓ Job {} queued for {} ({} test cases)",
-                job_id,
-                job.language,
-                job.test_cases.len()
+            info!(
+                job_id = %job_id,
+                language = %job.language,
+                test_cases = job.test_cases.len(),
+                "Job queued"
             );
             
             (
@@ -92,7 +93,7 @@ pub async fn submit_job(
             )
         }
         Err(e) => {
-            eprintln!("✗ Failed to queue job {}: {}", job_id, e);
+            error!(job_id = %job_id, error = %e, "Failed to queue job");
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(SubmitResponse {
@@ -106,4 +107,54 @@ pub async fn submit_job(
 /// GET /status - Health check endpoint
 pub async fn health_check() -> impl IntoResponse {
     (StatusCode::OK, "OK")
+}
+
+/// GET /job/{job_id} - Query execution result
+pub async fn get_job_result(
+    State(state): State<Arc<AppState>>,
+    Path(job_id): Path<String>,
+) -> impl IntoResponse {
+    // Parse job ID
+    let job_uuid = match Uuid::parse_str(&job_id) {
+        Ok(id) => id,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "error": "Invalid job ID format"
+                })),
+            ).into_response();
+        }
+    };
+
+    // Fetch result from Redis
+    let mut conn = state.redis.clone();
+    match redis::get_result(&mut conn, &job_uuid).await {
+        Ok(Some(result)) => {
+            info!(job_id = %job_id, status = ?result.overall_status, "Job result retrieved");
+            // Result exists - return it
+            (StatusCode::OK, Json(result)).into_response()
+        }
+        Ok(None) => {
+            info!(job_id = %job_id, "Job still pending");
+            // Result not found - job may still be queued/running
+            (
+                StatusCode::ACCEPTED,
+                Json(serde_json::json!({
+                    "job_id": job_id,
+                    "status": "pending",
+                    "message": "Job is queued or still executing"
+                })),
+            ).into_response()
+        }
+        Err(e) => {
+            error!(job_id = %job_id, error = %e, "Failed to fetch job result");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({
+                    "error": format!("Failed to query job status: {}", e)
+                })),
+            ).into_response()
+        }
+    }
 }

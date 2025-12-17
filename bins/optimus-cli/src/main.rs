@@ -1,5 +1,4 @@
 mod commands;
-mod generator;
 
 use clap::{Parser, Subcommand};
 use anyhow::Result;

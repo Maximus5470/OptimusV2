@@ -154,7 +154,7 @@ impl DockerEngine {
         // The runner handles decoding SOURCE_CODE and TEST_INPUT env vars
         match language {
             Language::Python => vec!["python".to_string(), "/runner.py".to_string()],
-            Language::Java => vec!["java".to_string(), "/runner.sh".to_string()],
+            Language::Java => vec!["java".to_string(), "-cp".to_string(), "/".to_string(), "Runner".to_string()],
             Language::Rust => vec!["rust".to_string(), "/runner.sh".to_string()],
         }
     }

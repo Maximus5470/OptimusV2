@@ -5,6 +5,7 @@ use axum::Router;
 use redis::aio::ConnectionManager;
 use std::sync::Arc;
 use tokio::net::TcpListener;
+use tracing::info;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -13,7 +14,16 @@ pub struct AppState {
 
 #[tokio::main]
 async fn main() {
-    println!("Optimus API booting...");
+    // Initialize tracing subscriber
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"))
+        )
+        .with_target(false)
+        .init();
+
+    info!("Optimus API booting...");
 
     // Connect to Redis
     let redis_url = std::env::var("REDIS_URL")
@@ -25,7 +35,7 @@ async fn main() {
     let redis_conn = ConnectionManager::new(client).await
         .expect("Failed to connect to Redis");
     
-    println!("✓ Connected to Redis: {}", redis_url);
+    info!("Connected to Redis: {}", redis_url);
 
     let state = Arc::new(AppState {
         redis: redis_conn,
@@ -41,8 +51,8 @@ async fn main() {
     let listener = TcpListener::bind(addr).await
         .expect("Failed to bind to address");
     
-    println!("✓ HTTP server listening on {}", addr);
-    println!("Ready to accept jobs");
+    info!("HTTP server listening on {}", addr);
+    info!("Ready to accept jobs");
 
     axum::serve(listener, app).await
         .expect("Server error");

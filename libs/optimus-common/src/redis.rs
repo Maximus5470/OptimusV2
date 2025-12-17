@@ -57,6 +57,46 @@ pub async fn pop_job(
     }
 }
 
+/// Store execution result in Redis
+/// TTL is optional - set to 24 hours for now (can be configured later)
+pub async fn store_result(
+    conn: &mut redis::aio::ConnectionManager,
+    result: &crate::types::ExecutionResult,
+) -> RedisResult<()> {
+    let key = result_key(&result.job_id);
+    let payload = serde_json::to_string(result)
+        .map_err(|e| redis::RedisError::from((redis::ErrorKind::TypeError, "serialization error", e.to_string())))?;
+    
+    // Store result with 24-hour TTL
+    let _: () = conn.set_ex(&key, payload, 86400).await?;
+    
+    // Also store status separately for quick lookup
+    let status_key_str = status_key(&result.job_id);
+    let status_str = serde_json::to_string(&result.overall_status)
+        .map_err(|e| redis::RedisError::from((redis::ErrorKind::TypeError, "serialization error", e.to_string())))?;
+    let _: () = conn.set_ex(&status_key_str, status_str, 86400).await?;
+    
+    Ok(())
+}
+
+/// Retrieve execution result from Redis
+pub async fn get_result(
+    conn: &mut redis::aio::ConnectionManager,
+    job_id: &uuid::Uuid,
+) -> RedisResult<Option<crate::types::ExecutionResult>> {
+    let key = result_key(job_id);
+    let payload: Option<String> = conn.get(&key).await?;
+    
+    match payload {
+        Some(data) => {
+            let result: crate::types::ExecutionResult = serde_json::from_str(&data)
+                .map_err(|e| redis::RedisError::from((redis::ErrorKind::TypeError, "deserialization error", e.to_string())))?;
+            Ok(Some(result))
+        }
+        None => Ok(None),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

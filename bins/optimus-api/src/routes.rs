@@ -12,4 +12,5 @@ pub fn routes() -> Router<Arc<AppState>> {
     Router::new()
         .route("/execute", post(handlers::submit_job))
         .route("/health", get(handlers::health_check))
+        .route("/job/:job_id", get(handlers::get_job_result))
 }

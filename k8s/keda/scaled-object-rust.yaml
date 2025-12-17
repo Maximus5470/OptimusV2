@@ -14,6 +14,6 @@ spec:
     - type: redis
       metadata:
         address: redis-master:6379
-        listName: jobs:rust
+        listName: optimus:queue:rust
         listLength: "1"
         enableTLS: "false"
