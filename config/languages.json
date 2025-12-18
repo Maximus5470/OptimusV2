@@ -2,14 +2,12 @@
   "languages": [
     {
       "name": "python",
-      "version": "3.11",
-      "image": "optimus-python:latest",
+      "version": "3.11-slim",
+      "image": "optimus-python:3.11-slim-v1",
       "dockerfile_path": "dockerfiles/python/Dockerfile",
       "execution": {
         "command": "python",
-        "args": [
-          "-u"
-        ],
+        "args": [],
         "file_extension": ".py"
       },
       "queue_name": "optimus:queue:python",
@@ -21,7 +19,7 @@
           "cpu": "500m"
         },
         "limits": {
-          "memory": "2Gi",
+          "memory": "1Gi",
           "cpu": "2000m"
         }
       },
@@ -33,7 +31,7 @@
     {
       "name": "java",
       "version": "17",
-      "image": "optimus-java:latest",
+      "image": "optimus-java:17-v1",
       "dockerfile_path": "dockerfiles/java/Dockerfile",
       "execution": {
         "command": "java",
@@ -45,11 +43,11 @@
       "cpu_limit": 1.0,
       "resources": {
         "requests": {
-          "memory": "1Gi",
+          "memory": "1024Mi",
           "cpu": "1000m"
         },
         "limits": {
-          "memory": "4Gi",
+          "memory": "2Gi",
           "cpu": "4000m"
         }
       },
@@ -60,11 +58,11 @@
     },
     {
       "name": "rust",
-      "version": "1.75",
-      "image": "optimus-rust:latest",
+      "version": "1.75-slim",
+      "image": "optimus-rust:1.75-slim-v1",
       "dockerfile_path": "dockerfiles/rust/Dockerfile",
       "execution": {
-        "command": "rustc",
+        "command": "rust",
         "args": [],
         "file_extension": ".rs"
       },
@@ -73,11 +71,11 @@
       "cpu_limit": 1.0,
       "resources": {
         "requests": {
-          "memory": "1Gi",
+          "memory": "1024Mi",
           "cpu": "1000m"
         },
         "limits": {
-          "memory": "4Gi",
+          "memory": "2Gi",
           "cpu": "4000m"
         }
       },

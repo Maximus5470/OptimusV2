@@ -303,10 +303,11 @@ impl DockerEngine {
         // Prepare environment and command
         let cmd = self.get_execution_command(language);
         
-        // Create container configuration
+        // Create container configuration with LANGUAGE env var for universal runner
         let env = vec![
             format!("SOURCE_CODE={}", general_purpose::STANDARD.encode(source_code)),
             format!("TEST_INPUT={}", general_purpose::STANDARD.encode(input)),
+            format!("LANGUAGE={}", format!("{}", language).to_lowercase()),
         ];
 
         // Get resource limits from config
