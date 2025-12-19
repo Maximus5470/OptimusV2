@@ -41,6 +41,8 @@ case "$LANGUAGE" in
     java)
         # Write Java code
         echo "$SOURCE_CODE" > /code/Main.java
+
+        unset JAVA_TOOL_OPTIONS
         
         # Compile Java code
         javac /code/Main.java 2>&1

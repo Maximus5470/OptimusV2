@@ -71,20 +71,20 @@ echo -e "${GREEN}✓ Workspace built successfully${NC}"
 # Step 3: Setup Redis Container
 print_section "STEP 3: Setting up Redis Container"
 
-echo -e "${CYAN}→ Checking for existing optimus-redis container...${NC}"
-if docker ps -a --filter "name=optimus-redis" --format "{{.Names}}" | grep -q "optimus-redis"; then
-    echo -e "${YELLOW}  Container 'optimus-redis' already exists${NC}"
+echo -e "${CYAN}→ Checking for existing redis-optimus container...${NC}"
+if docker ps -a --filter "name=redis-optimus" --format "{{.Names}}" | grep -q "redis-optimus"; then
+    echo -e "${YELLOW}  Container 'redis-optimus' already exists${NC}"
     echo -e "${CYAN}→ Removing existing container...${NC}"
-    docker rm -f optimus-redis >/dev/null 2>&1
+    docker rm -f redis-optimus >/dev/null 2>&1
 fi
 
-echo -e "${CYAN}→ Creating Redis container (redis:7-alpine)...${NC}"
+echo -e "${CYAN}→ Creating Redis container (redis:8-alpine)...${NC}"
 docker run -d \
-    --name optimus-redis \
+    --name redis-optimus \
     -p 6379:6379 \
-    redis:7-alpine
+    redis:8-alpine
 
-echo -e "${GREEN}✓ Redis container 'optimus-redis' created and running on port 6379${NC}"
+echo -e "${GREEN}✓ Redis container 'redis-optimus' created and running on port 6379${NC}"
 
 # Step 4: Configure Languages
 print_section "STEP 4: Configuring Languages"
@@ -137,7 +137,7 @@ docker images | grep "optimus-"
 
 echo ""
 echo -e "${CYAN}→ Checking Redis container...${NC}"
-docker ps --filter "name=optimus-redis" --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"
+docker ps --filter "name=redis-optimus" --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"
 
 # Final Summary
 echo ""
