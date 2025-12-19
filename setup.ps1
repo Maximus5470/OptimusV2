@@ -73,26 +73,26 @@ Write-Host "✓ Workspace built successfully" -ForegroundColor Green
 Write-Section "STEP 3: Setting up Redis Container"
 
 Write-Host "→ Checking for existing optimus-redis container..." -ForegroundColor Cyan
-$existingContainer = docker ps -a --filter "name=optimus-redis" --format "{{.Names}}"
+$existingContainer = docker ps -a --filter "name=redis-optimus" --format "{{.Names}}"
 
-if ($existingContainer -eq "optimus-redis") {
-    Write-Host "  Container 'optimus-redis' already exists" -ForegroundColor Yellow
+if ($existingContainer -eq "redis-optimus") {
+    Write-Host "  Container 'redis-optimus' already exists" -ForegroundColor Yellow
     Write-Host "→ Removing existing container..." -ForegroundColor Cyan
-    docker rm -f optimus-redis | Out-Null
+    docker rm -f redis-optimus | Out-Null
 }
 
-Write-Host "→ Creating Redis container (redis:7-alpine)..." -ForegroundColor Cyan
+Write-Host "→ Creating Redis container (redis:8-alpine)..." -ForegroundColor Cyan
 docker run -d `
-    --name optimus-redis `
+    --name redis-optimus `
     -p 6379:6379 `
-    redis:7-alpine
+    redis:8-alpine
 
 if ($LASTEXITCODE -ne 0) {
     Write-Host "✗ Failed to create Redis container!" -ForegroundColor Red
     exit 1
 }
 
-Write-Host "✓ Redis container 'optimus-redis' created and running on port 6379" -ForegroundColor Green
+Write-Host "✓ Redis container 'redis-optimus' created and running on port 6379" -ForegroundColor Green
 
 # Step 4: Configure Languages
 Write-Section "STEP 4: Configuring Languages"
