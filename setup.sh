@@ -62,68 +62,86 @@ cargo --version
 # Step 2: Build Workspace
 print_section "STEP 2: Building Optimus Workspace"
 
-echo -e "${CYAN}→ Building all binaries in release mode...${NC}"
-echo -e "${YELLOW}  This may take a few minutes on first run...${NC}"
-cargo build --workspace --release
-
-echo -e "${GREEN}✓ Workspace built successfully${NC}"
+echo -e "${CYAN}→ Checking if workspace is already built...${NC}"
+if [ -f "./target/release/optimus-api" ] && [ -f "./target/release/optimus-worker" ] && [ -f "./target/release/optimus-cli" ]; then
+    echo -e "${YELLOW}  Workspace already built. Skipping build step.${NC}"
+else
+    echo -e "${CYAN}→ Building all binaries in release mode...${NC}"
+    echo -e "${YELLOW}  This may take a few minutes on first run...${NC}"
+    cargo build --workspace --release
+    echo -e "${GREEN}✓ Workspace built successfully${NC}"
+fi
 
 # Step 3: Setup Redis Container
 print_section "STEP 3: Setting up Redis Container"
 
-echo -e "${CYAN}→ Checking for existing optimus-redis container...${NC}"
-if docker ps -a --filter "name=optimus-redis" --format "{{.Names}}" | grep -q "optimus-redis"; then
-    echo -e "${YELLOW}  Container 'optimus-redis' already exists${NC}"
-    echo -e "${CYAN}→ Removing existing container...${NC}"
-    docker rm -f optimus-redis >/dev/null 2>&1
+echo -e "${CYAN}→ Checking for existing redis-optimus container...${NC}"
+if docker ps --filter "name=redis-optimus" --format "{{.Names}}" | grep -q "redis-optimus"; then
+    echo -e "${GREEN}✓ Redis container 'redis-optimus' already running on port 6379${NC}"
+else
+    if docker ps -a --filter "name=redis-optimus" --format "{{.Names}}" | grep -q "redis-optimus"; then
+        echo -e "${CYAN}→ Restarting existing Redis container...${NC}"
+        docker start redis-optimus >/dev/null 2>&1
+    else
+        echo -e "${CYAN}→ Creating Redis container (redis:8-alpine)...${NC}"
+        docker run -d \
+            --name redis-optimus \
+            -p 6379:6379 \
+            redis:8-alpine
+    fi
+    echo -e "${GREEN}✓ Redis container 'redis-optimus' created and running on port 6379${NC}"
 fi
-
-echo -e "${CYAN}→ Creating Redis container (redis:7-alpine)...${NC}"
-docker run -d \
-    --name optimus-redis \
-    -p 6379:6379 \
-    redis:7-alpine
-
-echo -e "${GREEN}✓ Redis container 'optimus-redis' created and running on port 6379${NC}"
 
 # Step 4: Configure Languages
 print_section "STEP 4: Configuring Languages"
 
 # Python
 echo ""
-echo -e "${CYAN}→ Adding Python language...${NC}"
-./target/release/optimus-cli add-lang \
-    --name python \
-    --ext py \
-    --version 3.11-slim \
-    --memory 256 \
-    --cpu 0.5
-
-echo -e "${GREEN}✓ Python configured and Docker image built${NC}"
+echo -e "${CYAN}→ Checking if Python language is configured...${NC}"
+if ./target/release/optimus-cli list-langs 2>/dev/null | grep -q "python"; then
+    echo -e "${YELLOW}  Python language already configured. Skipping.${NC}"
+else
+    echo -e "${CYAN}→ Adding Python language...${NC}"
+    ./target/release/optimus-cli add-lang \
+        --name python \
+        --ext py \
+        --version 3.11-slim \
+        --memory 256 \
+        --cpu 0.5
+    echo -e "${GREEN}✓ Python configured and Docker image built${NC}"
+fi
 
 # Java
 echo ""
-echo -e "${CYAN}→ Adding Java language...${NC}"
-./target/release/optimus-cli add-lang \
-    --name java \
-    --ext java \
-    --version 17 \
-    --memory 512 \
-    --cpu 1.0
-
-echo -e "${GREEN}✓ Java configured and Docker image built${NC}"
+echo -e "${CYAN}→ Checking if Java language is configured...${NC}"
+if ./target/release/optimus-cli list-langs 2>/dev/null | grep -q "java"; then
+    echo -e "${YELLOW}  Java language already configured. Skipping.${NC}"
+else
+    echo -e "${CYAN}→ Adding Java language...${NC}"
+    ./target/release/optimus-cli add-lang \
+        --name java \
+        --ext java \
+        --version 17 \
+        --memory 512 \
+        --cpu 1.0
+    echo -e "${GREEN}✓ Java configured and Docker image built${NC}"
+fi
 
 # Rust
 echo ""
-echo -e "${CYAN}→ Adding Rust language...${NC}"
-./target/release/optimus-cli add-lang \
-    --name rust \
-    --ext rs \
-    --version 1.75-slim \
-    --memory 512 \
-    --cpu 1.0
-
-echo -e "${GREEN}✓ Rust configured and Docker image built${NC}"
+echo -e "${CYAN}→ Checking if Rust language is configured...${NC}"
+if ./target/release/optimus-cli list-langs 2>/dev/null | grep -q "rust"; then
+    echo -e "${YELLOW}  Rust language already configured. Skipping.${NC}"
+else
+    echo -e "${CYAN}→ Adding Rust language...${NC}"
+    ./target/release/optimus-cli add-lang \
+        --name rust \
+        --ext rs \
+        --version 1.75-slim \
+        --memory 512 \
+        --cpu 1.0
+    echo -e "${GREEN}✓ Rust configured and Docker image built${NC}"
+fi
 
 # Step 5: Verify Setup
 print_section "STEP 5: Verifying Setup"
@@ -137,7 +155,7 @@ docker images | grep "optimus-"
 
 echo ""
 echo -e "${CYAN}→ Checking Redis container...${NC}"
-docker ps --filter "name=optimus-redis" --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"
+docker ps --filter "name=redis-optimus" --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"
 
 # Final Summary
 echo ""
