@@ -76,21 +76,19 @@ fi
 print_section "STEP 3: Setting up Redis Container"
 
 echo -e "${CYAN}→ Checking for existing redis-optimus container...${NC}"
-if docker ps --filter "name=redis-optimus" --format "{{.Names}}" | grep -q "redis-optimus"; then
-    echo -e "${GREEN}✓ Redis container 'redis-optimus' already running on port 6379${NC}"
-else
-    if docker ps -a --filter "name=redis-optimus" --format "{{.Names}}" | grep -q "redis-optimus"; then
-        echo -e "${CYAN}→ Restarting existing Redis container...${NC}"
-        docker start redis-optimus >/dev/null 2>&1
-    else
-        echo -e "${CYAN}→ Creating Redis container (redis:8-alpine)...${NC}"
-        docker run -d \
-            --name redis-optimus \
-            -p 6379:6379 \
-            redis:8-alpine
-    fi
-    echo -e "${GREEN}✓ Redis container 'redis-optimus' created and running on port 6379${NC}"
+if docker ps -a --filter "name=redis-optimus" --format "{{.Names}}" | grep -q "redis-optimus"; then
+    echo -e "${YELLOW}  Container 'redis-optimus' already exists${NC}"
+    echo -e "${CYAN}→ Removing existing container...${NC}"
+    docker rm -f redis-optimus >/dev/null 2>&1
 fi
+
+echo -e "${CYAN}→ Creating Redis container (redis:8-alpine)...${NC}"
+docker run -d \
+    --name redis-optimus \
+    -p 6379:6379 \
+    redis:8-alpine
+
+echo -e "${GREEN}✓ Redis container 'redis-optimus' created and running on port 6379${NC}"
 
 # Step 4: Configure Languages
 print_section "STEP 4: Configuring Languages"

@@ -76,7 +76,7 @@ cargo build --workspace --release
 
 ```bash
 # Start Redis container
-docker run -d --name optimus-redis -p 6379:6379 redis:7-alpine
+docker run -d --name optimus-redis -p 6379:6379 redis:8-alpine
 ```
 
 #### 4. Configure Languages

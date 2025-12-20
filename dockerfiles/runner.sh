@@ -41,6 +41,8 @@ case "$LANGUAGE" in
     java)
         # Write Java code
         echo "$SOURCE_CODE" > /code/Main.java
+
+        unset JAVA_TOOL_OPTIONS
         
         # Unset JAVA_TOOL_OPTIONS to suppress the informational message
         unset JAVA_TOOL_OPTIONS
