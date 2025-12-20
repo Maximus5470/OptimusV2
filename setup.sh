@@ -62,11 +62,15 @@ cargo --version
 # Step 2: Build Workspace
 print_section "STEP 2: Building Optimus Workspace"
 
-echo -e "${CYAN}→ Building all binaries in release mode...${NC}"
-echo -e "${YELLOW}  This may take a few minutes on first run...${NC}"
-cargo build --workspace --release
-
-echo -e "${GREEN}✓ Workspace built successfully${NC}"
+echo -e "${CYAN}→ Checking if workspace is already built...${NC}"
+if [ -f "./target/release/optimus-api" ] && [ -f "./target/release/optimus-worker" ] && [ -f "./target/release/optimus-cli" ]; then
+    echo -e "${YELLOW}  Workspace already built. Skipping build step.${NC}"
+else
+    echo -e "${CYAN}→ Building all binaries in release mode...${NC}"
+    echo -e "${YELLOW}  This may take a few minutes on first run...${NC}"
+    cargo build --workspace --release
+    echo -e "${GREEN}✓ Workspace built successfully${NC}"
+fi
 
 # Step 3: Setup Redis Container
 print_section "STEP 3: Setting up Redis Container"
@@ -91,39 +95,51 @@ print_section "STEP 4: Configuring Languages"
 
 # Python
 echo ""
-echo -e "${CYAN}→ Adding Python language...${NC}"
-./target/release/optimus-cli add-lang \
-    --name python \
-    --ext py \
-    --version 3.11-slim \
-    --memory 256 \
-    --cpu 0.5
-
-echo -e "${GREEN}✓ Python configured and Docker image built${NC}"
+echo -e "${CYAN}→ Checking if Python language is configured...${NC}"
+if ./target/release/optimus-cli list-langs 2>/dev/null | grep -q "python"; then
+    echo -e "${YELLOW}  Python language already configured. Skipping.${NC}"
+else
+    echo -e "${CYAN}→ Adding Python language...${NC}"
+    ./target/release/optimus-cli add-lang \
+        --name python \
+        --ext py \
+        --version 3.11-slim \
+        --memory 256 \
+        --cpu 0.5
+    echo -e "${GREEN}✓ Python configured and Docker image built${NC}"
+fi
 
 # Java
 echo ""
-echo -e "${CYAN}→ Adding Java language...${NC}"
-./target/release/optimus-cli add-lang \
-    --name java \
-    --ext java \
-    --version 17 \
-    --memory 512 \
-    --cpu 1.0
-
-echo -e "${GREEN}✓ Java configured and Docker image built${NC}"
+echo -e "${CYAN}→ Checking if Java language is configured...${NC}"
+if ./target/release/optimus-cli list-langs 2>/dev/null | grep -q "java"; then
+    echo -e "${YELLOW}  Java language already configured. Skipping.${NC}"
+else
+    echo -e "${CYAN}→ Adding Java language...${NC}"
+    ./target/release/optimus-cli add-lang \
+        --name java \
+        --ext java \
+        --version 17 \
+        --memory 512 \
+        --cpu 1.0
+    echo -e "${GREEN}✓ Java configured and Docker image built${NC}"
+fi
 
 # Rust
 echo ""
-echo -e "${CYAN}→ Adding Rust language...${NC}"
-./target/release/optimus-cli add-lang \
-    --name rust \
-    --ext rs \
-    --version 1.75-slim \
-    --memory 512 \
-    --cpu 1.0
-
-echo -e "${GREEN}✓ Rust configured and Docker image built${NC}"
+echo -e "${CYAN}→ Checking if Rust language is configured...${NC}"
+if ./target/release/optimus-cli list-langs 2>/dev/null | grep -q "rust"; then
+    echo -e "${YELLOW}  Rust language already configured. Skipping.${NC}"
+else
+    echo -e "${CYAN}→ Adding Rust language...${NC}"
+    ./target/release/optimus-cli add-lang \
+        --name rust \
+        --ext rs \
+        --version 1.75-slim \
+        --memory 512 \
+        --cpu 1.0
+    echo -e "${GREEN}✓ Rust configured and Docker image built${NC}"
+fi
 
 # Step 5: Verify Setup
 print_section "STEP 5: Verifying Setup"

@@ -44,6 +44,9 @@ case "$LANGUAGE" in
 
         unset JAVA_TOOL_OPTIONS
         
+        # Unset JAVA_TOOL_OPTIONS to suppress the informational message
+        unset JAVA_TOOL_OPTIONS
+        
         # Compile Java code
         javac /code/Main.java 2>&1
         
