@@ -2,8 +2,12 @@
 # Universal Optimus Code Runner
 # This script detects the language and executes code appropriately
 # Supports: Python, Java, Rust, C++, Go, Node.js, and more
+#
+# CRITICAL: All execution commands MUST explicitly propagate exit codes
+# to ensure runtime errors are detected by the Docker engine
 
 set -e
+set -o pipefail
 
 # Read environment variables
 SOURCE_CODE_B64="${SOURCE_CODE:-}"
@@ -36,13 +40,13 @@ case "$LANGUAGE" in
         
         # Execute Python code with test input
         echo "$TEST_INPUT" | python3 -u /code/main.py
+        # CRITICAL: Propagate exit code to Docker
+        exit $?
         ;;
         
     java)
         # Write Java code
         echo "$SOURCE_CODE" > /code/Main.java
-
-        unset JAVA_TOOL_OPTIONS
         
         # Unset JAVA_TOOL_OPTIONS to suppress the informational message
         unset JAVA_TOOL_OPTIONS
@@ -57,6 +61,8 @@ case "$LANGUAGE" in
         
         # Execute Java code with test input
         echo "$TEST_INPUT" | java -cp /code Main
+        # CRITICAL: Propagate exit code to Docker
+        exit $?
         ;;
         
     rust)
@@ -73,6 +79,8 @@ case "$LANGUAGE" in
         
         # Execute Rust binary with test input
         echo "$TEST_INPUT" | /code/main
+        # CRITICAL: Propagate exit code to Docker
+        exit $?
         ;;
         
     cpp|c++)
@@ -89,6 +97,8 @@ case "$LANGUAGE" in
         
         # Execute C++ binary with test input
         echo "$TEST_INPUT" | /code/main
+        # CRITICAL: Propagate exit code to Docker
+        exit $?
         ;;
         
     c)
@@ -105,6 +115,8 @@ case "$LANGUAGE" in
         
         # Execute C binary with test input
         echo "$TEST_INPUT" | /code/main
+        # CRITICAL: Propagate exit code to Docker
+        exit $?
         ;;
         
     go)
@@ -113,6 +125,8 @@ case "$LANGUAGE" in
         
         # Execute Go code with test input (compile and run)
         echo "$TEST_INPUT" | go run /code/main.go
+        # CRITICAL: Propagate exit code to Docker
+        exit $?
         ;;
         
     javascript|node|nodejs)
@@ -121,6 +135,8 @@ case "$LANGUAGE" in
         
         # Execute Node.js code with test input
         echo "$TEST_INPUT" | node /code/main.js
+        # CRITICAL: Propagate exit code to Docker
+        exit $?
         ;;
         
     typescript|ts)
@@ -137,6 +153,8 @@ case "$LANGUAGE" in
         
         # Execute compiled JavaScript with test input
         echo "$TEST_INPUT" | node /code/main.js
+        # CRITICAL: Propagate exit code to Docker
+        exit $?
         ;;
         
     ruby)
@@ -145,6 +163,8 @@ case "$LANGUAGE" in
         
         # Execute Ruby code with test input
         echo "$TEST_INPUT" | ruby /code/main.rb
+        # CRITICAL: Propagate exit code to Docker
+        exit $?
         ;;
         
     php)
@@ -153,6 +173,8 @@ case "$LANGUAGE" in
         
         # Execute PHP code with test input
         echo "$TEST_INPUT" | php /code/main.php
+        # CRITICAL: Propagate exit code to Docker
+        exit $?
         ;;
         
     kotlin)
@@ -169,6 +191,8 @@ case "$LANGUAGE" in
         
         # Execute Kotlin JAR with test input
         echo "$TEST_INPUT" | java -jar /code/main.jar
+        # CRITICAL: Propagate exit code to Docker
+        exit $?
         ;;
         
     scala)
@@ -177,6 +201,8 @@ case "$LANGUAGE" in
         
         # Compile and execute Scala code with test input
         echo "$TEST_INPUT" | scala /code/Main.scala
+        # CRITICAL: Propagate exit code to Docker
+        exit $?
         ;;
         
     csharp|cs)
@@ -193,6 +219,8 @@ case "$LANGUAGE" in
         
         # Execute C# binary with test input
         echo "$TEST_INPUT" | mono /code/main.exe
+        # CRITICAL: Propagate exit code to Docker
+        exit $?
         ;;
         
     swift)
@@ -209,6 +237,8 @@ case "$LANGUAGE" in
         
         # Execute Swift binary with test input
         echo "$TEST_INPUT" | /code/main
+        # CRITICAL: Propagate exit code to Docker
+        exit $?
         ;;
         
     *)
