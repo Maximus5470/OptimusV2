@@ -87,6 +87,18 @@ pub fn evaluate_test(output: &TestExecutionOutput, test_case: &TestCase) -> Test
         }
     };
 
+    // Defensive assertion: Runtime errors and timeouts can NEVER result in Passed status
+    debug_assert!(
+        !(output.runtime_error && matches!(status, TestStatus::Passed)),
+        "Invariant violation: RuntimeError test marked as Passed (test_id: {})",
+        output.test_id
+    );
+    debug_assert!(
+        !(output.timed_out && matches!(status, TestStatus::Passed)),
+        "Invariant violation: TimedOut test marked as Passed (test_id: {})",
+        output.test_id
+    );
+
     TestResult {
         test_id: output.test_id,
         status,
@@ -691,5 +703,203 @@ mod tests {
         assert_eq!(result.max_score, 40);
         assert_eq!(result.overall_status, JobStatus::Completed);
         assert_eq!(result.job_id, job.id);
+    }
+
+    // ============================================================================
+    // CRITICAL INVARIANT TESTS - These prevent regressions of the core contract
+    // ============================================================================
+
+    /// CRITICAL TEST: Runtime error must NEVER result in Passed status
+    /// This is the primary bug these tests prevent
+    #[test]
+    fn test_runtime_error_never_passes_even_with_correct_output() {
+        let test_case = make_test_case(1, "correct output", 10);
+        
+        // Execution that has runtime error BUT has correct output in stdout
+        let exec = TestExecutionOutput {
+            test_id: 1,
+            runtime_error: true,
+            timed_out: false,
+            stdout: "correct output".to_string(), // Matches expected!
+            stderr: "Traceback (most recent call last):\n  File \"test.py\", line 1\nZeroDivisionError".to_string(),
+            execution_time_ms: 10,
+        };
+
+        let result = evaluate_test(&exec, &test_case);
+
+        // MUST be RuntimeError, NOT Passed
+        assert_eq!(result.status, TestStatus::RuntimeError, 
+            "Runtime error test MUST NOT pass, even if output matches");
+        assert_eq!(result.stdout, "correct output");
+        assert!(result.stderr.contains("ZeroDivisionError"));
+    }
+
+    /// CRITICAL TEST: Timeout must NEVER result in Passed status
+    #[test]
+    fn test_timeout_never_passes_even_with_correct_output() {
+        let test_case = make_test_case(1, "correct output", 10);
+        
+        // Execution that timed out BUT has correct output
+        let exec = TestExecutionOutput {
+            test_id: 1,
+            runtime_error: false,
+            timed_out: true,
+            stdout: "correct output".to_string(), // Matches expected!
+            stderr: String::new(),
+            execution_time_ms: 5001,
+        };
+
+        let result = evaluate_test(&exec, &test_case);
+
+        // MUST be TimeLimitExceeded, NOT Passed
+        assert_eq!(result.status, TestStatus::TimeLimitExceeded,
+            "Timed out test MUST NOT pass, even if output matches");
+    }
+
+    /// CRITICAL TEST: Only clean execution with correct output can pass
+    #[test]
+    fn test_only_clean_execution_with_correct_output_passes() {
+        let test_case = make_test_case(1, "expected", 10);
+        
+        let exec = TestExecutionOutput {
+            test_id: 1,
+            runtime_error: false,
+            timed_out: false,
+            stdout: "expected".to_string(),
+            stderr: String::new(),
+            execution_time_ms: 42,
+        };
+
+        let result = evaluate_test(&exec, &test_case);
+
+        assert_eq!(result.status, TestStatus::Passed,
+            "Clean execution with correct output MUST pass");
+    }
+
+    /// CRITICAL TEST: Runtime error takes precedence over timeout
+    #[test]
+    fn test_runtime_error_precedence_over_timeout() {
+        let test_case = make_test_case(1, "output", 10);
+        
+        // Both flags set - runtime_error should win
+        let exec = TestExecutionOutput {
+            test_id: 1,
+            runtime_error: true,
+            timed_out: true,
+            stdout: String::new(),
+            stderr: "Error".to_string(),
+            execution_time_ms: 5001,
+        };
+
+        let result = evaluate_test(&exec, &test_case);
+
+        assert_eq!(result.status, TestStatus::RuntimeError,
+            "RuntimeError must take precedence over timeout");
+    }
+
+    /// CRITICAL TEST: Failed tests contribute zero to score
+    #[test]
+    fn test_runtime_error_contributes_zero_score() {
+        let job = JobRequest {
+            id: Uuid::new_v4(),
+            language: Language::Python,
+            source_code: String::new(),
+            test_cases: vec![
+                make_test_case(1, "output", 50),
+            ],
+            timeout_ms: 5000,
+            metadata: optimus_common::types::JobMetadata::default(),
+        };
+
+        let outputs = vec![TestExecutionOutput {
+            test_id: 1,
+            runtime_error: true,
+            timed_out: false,
+            stdout: "output".to_string(), // Even though output matches
+            stderr: "RuntimeError".to_string(),
+            execution_time_ms: 10,
+        }];
+
+        let result = evaluate(&job, outputs);
+
+        assert_eq!(result.score, 0, "Runtime error test must contribute 0 to score");
+        assert_eq!(result.max_score, 50);
+        assert_eq!(result.overall_status, JobStatus::Failed);
+    }
+
+    /// CRITICAL TEST: Timeout contributes zero to score
+    #[test]
+    fn test_timeout_contributes_zero_score() {
+        let job = JobRequest {
+            id: Uuid::new_v4(),
+            language: Language::Python,
+            source_code: String::new(),
+            test_cases: vec![
+                make_test_case(1, "output", 30),
+            ],
+            timeout_ms: 1000,
+            metadata: optimus_common::types::JobMetadata::default(),
+        };
+
+        let outputs = vec![TestExecutionOutput {
+            test_id: 1,
+            runtime_error: false,
+            timed_out: true,
+            stdout: "output".to_string(), // Even though output matches
+            stderr: String::new(),
+            execution_time_ms: 1001,
+        }];
+
+        let result = evaluate(&job, outputs);
+
+        assert_eq!(result.score, 0, "Timeout test must contribute 0 to score");
+        assert_eq!(result.max_score, 30);
+        assert_eq!(result.overall_status, JobStatus::Failed);
+    }
+
+    /// CRITICAL TEST: Mix of runtime error and passed tests scores correctly
+    #[test]
+    fn test_mixed_runtime_error_and_passed_scoring() {
+        let job = JobRequest {
+            id: Uuid::new_v4(),
+            language: Language::Python,
+            source_code: String::new(),
+            test_cases: vec![
+                make_test_case(1, "output1", 20),
+                make_test_case(2, "output2", 30),
+                make_test_case(3, "output3", 10),
+            ],
+            timeout_ms: 5000,
+            metadata: optimus_common::types::JobMetadata::default(),
+        };
+
+        let outputs = vec![
+            make_output(1, "output1", 50), // Pass
+            TestExecutionOutput { // Runtime error - even with correct output
+                test_id: 2,
+                runtime_error: true,
+                timed_out: false,
+                stdout: "output2".to_string(),
+                stderr: "Error".to_string(),
+                execution_time_ms: 10,
+            },
+            TestExecutionOutput { // Timeout - even with correct output
+                test_id: 3,
+                runtime_error: false,
+                timed_out: true,
+                stdout: "output3".to_string(),
+                stderr: String::new(),
+                execution_time_ms: 5001,
+            },
+        ];
+
+        let result = evaluate(&job, outputs);
+
+        assert_eq!(result.score, 20, "Only passed test should contribute");
+        assert_eq!(result.max_score, 60);
+        assert_eq!(result.overall_status, JobStatus::Completed);
+        assert_eq!(result.results[0].status, TestStatus::Passed);
+        assert_eq!(result.results[1].status, TestStatus::RuntimeError);
+        assert_eq!(result.results[2].status, TestStatus::TimeLimitExceeded);
     }
 }
