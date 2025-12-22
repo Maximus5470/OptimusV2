@@ -75,6 +75,9 @@ pub fn evaluate_test(output: &TestExecutionOutput, test_case: &TestCase) -> Test
         TestStatus::RuntimeError
     } else if output.timed_out {
         TestStatus::TimeLimitExceeded
+    } else if !output.stderr.trim().is_empty() {
+        // Any output to stderr indicates an error/warning - mark as failed
+        TestStatus::Failed
     } else {
         // Compare normalized outputs
         let actual = normalize_output(&output.stdout);
@@ -163,9 +166,14 @@ pub fn aggregate_results(
             TestStatus::RuntimeError => println!("    ✗ Runtime error"),
             TestStatus::TimeLimitExceeded => println!("    ✗ Timeout"),
             TestStatus::Failed => {
-                println!("    ✗ Output mismatch");
-                println!("    Expected: \"{}\"", normalize_output(&test_case.expected_output));
-                println!("    Got:      \"{}\"", normalize_output(&output.stdout));
+                if !output.stderr.trim().is_empty() {
+                    println!("    ✗ Error/warning detected in stderr");
+                    println!("    stderr: \"{}\"", output.stderr.trim());
+                } else {
+                    println!("    ✗ Output mismatch");
+                    println!("    Expected: \"{}\"", normalize_output(&test_case.expected_output));
+                    println!("    Got:      \"{}\"", normalize_output(&output.stdout));
+                }
             }
         }
 

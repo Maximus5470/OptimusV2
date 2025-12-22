@@ -394,7 +394,7 @@ impl DockerEngine {
                 }
             }
             
-            // Get exit code
+            // Get exit code - wait for container to finish
             let wait_options = WaitContainerOptions {
                 condition: "not-running",
             };
@@ -403,7 +403,12 @@ impl DockerEngine {
             if let Some(wait_result) = wait_stream.next().await {
                 if let Ok(response) = wait_result {
                     exit_code = Some(response.status_code);
+                    println!("    Container exited with code: {}", response.status_code);
+                } else {
+                    eprintln!("    ⚠ Failed to get container exit code");
                 }
+            } else {
+                eprintln!("    ⚠ No wait response from container");
             }
             
             (stdout, stderr, exit_code)
@@ -416,9 +421,11 @@ impl DockerEngine {
             Ok((out, mut err, code)) => {
                 // Execution completed within timeout
                 // Classify error type based on exit code
+                println!("    Received exit code: {:?}", code);
                 if let Some(code) = code {
                     if code != 0 {
                         runtime_error = true;
+                        println!("    ✗ Runtime error detected (exit code: {})", code);
                         
                         // Special handling for common signals
                         if code == 137 {
@@ -426,7 +433,11 @@ impl DockerEngine {
                         } else if code == 139 {
                             err.push_str("\n[Container killed: segmentation fault]");
                         }
+                    } else {
+                        println!("    ✓ Container exited successfully (code 0)");
                     }
+                } else {
+                    eprintln!("    ⚠ WARNING: No exit code captured from container!");
                 }
                 
                 (out, err, code)
