@@ -549,7 +549,6 @@ impl DockerEngine {
                     Err(e) => {
                         return Ok(crate::evaluator::CompilationResult::failure(
                             format!("Failed to read compilation output: {}", e),
-                            start_time.elapsed().as_millis() as u64,
                         ));
                     }
                 }
@@ -557,7 +556,6 @@ impl DockerEngine {
         } else {
             return Ok(crate::evaluator::CompilationResult::failure(
                 "Failed to attach to compilation exec".to_string(),
-                start_time.elapsed().as_millis() as u64,
             ));
         }
         
@@ -574,7 +572,7 @@ impl DockerEngine {
                 language = %language,
                 "Compilation succeeded"
             );
-            Ok(crate::evaluator::CompilationResult::success(compilation_time_ms))
+            Ok(crate::evaluator::CompilationResult::success())
         } else {
             println!("    ✗ Compilation failed in {}ms", compilation_time_ms);
             if !stderr.is_empty() {
@@ -588,7 +586,6 @@ impl DockerEngine {
             );
             Ok(crate::evaluator::CompilationResult::failure(
                 stderr,
-                compilation_time_ms,
             ))
         }
     }

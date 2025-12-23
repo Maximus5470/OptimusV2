@@ -33,34 +33,25 @@ use optimus_common::types::{
 /// Result of code compilation phase
 /// Tracks whether compilation succeeded or failed
 #[derive(Debug, Clone)]
-#[allow(dead_code)] // Will be used in Phase 2
 pub struct CompilationResult {
     pub success: bool,
-    pub stdout: String,
     pub stderr: String,
-    pub compilation_time_ms: u64,
 }
 
 impl CompilationResult {
     /// Create a successful compilation result
-    #[allow(dead_code)] // Will be used in Phase 2
-    pub fn success(compilation_time_ms: u64) -> Self {
+    pub fn success() -> Self {
         Self {
             success: true,
-            stdout: String::new(),
             stderr: String::new(),
-            compilation_time_ms,
         }
     }
 
     /// Create a failed compilation result
-    #[allow(dead_code)] // Will be used in Phase 2
-    pub fn failure(stderr: String, compilation_time_ms: u64) -> Self {
+    pub fn failure(stderr: String) -> Self {
         Self {
             success: false,
-            stdout: String::new(),
             stderr,
-            compilation_time_ms,
         }
     }
 }
