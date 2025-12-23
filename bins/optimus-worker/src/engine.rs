@@ -862,7 +862,7 @@ impl DockerEngine {
         };
 
         let container_id = container.id.clone();
-        let guard = ContainerGuard::new(&self.docker, container_id.clone());
+        let _guard = ContainerGuard::new(&self.docker, container_id.clone());
 
         // Start container
         if let Err(e) = self.docker.start_container(&container_id, None::<StartContainerOptions<String>>).await {
