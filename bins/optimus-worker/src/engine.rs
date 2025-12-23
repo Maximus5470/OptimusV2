@@ -138,7 +138,7 @@ impl<'a> ContainerGuard<'a> {
 impl<'a> Drop for ContainerGuard<'a> {
     fn drop(&mut self) {
         // Best-effort cleanup - cannot be async in Drop
-        // Log if cleanup fails but don't panic
+        // Fire-and-forget cleanup task
         let container_id = self.container_id.clone();
         let docker = self.docker.clone();
         
@@ -346,7 +346,7 @@ impl DockerEngine {
         
         // CRITICAL: Set up cleanup guard immediately after container creation
         // This guarantees cleanup even if we panic or get cancelled
-        let _guard = ContainerGuard::new(&self.docker, container_id.clone());
+        let guard = ContainerGuard::new(&self.docker, container_id.clone());
 
         // Start execution timer
         let start_time = Instant::now();
@@ -465,7 +465,8 @@ impl DockerEngine {
         let execution_time_ms = start_time.elapsed().as_millis() as u64;
 
         // Container cleanup happens automatically via Drop guard
-        // No need for explicit cleanup here
+        // Explicitly keep guard alive until here
+        drop(guard);
 
         Ok(TestExecutionOutput {
             test_id: 0, // Will be set by executor
@@ -861,7 +862,7 @@ impl DockerEngine {
         };
 
         let container_id = container.id.clone();
-        let _guard = ContainerGuard::new(&self.docker, container_id.clone());
+        let guard = ContainerGuard::new(&self.docker, container_id.clone());
 
         // Start container
         if let Err(e) = self.docker.start_container(&container_id, None::<StartContainerOptions<String>>).await {
@@ -967,6 +968,16 @@ impl DockerEngine {
             tests_failed = outputs.len() - successful_tests,
             "Completed compile-once job execution"
         );
+        
+        // Explicitly cleanup container before returning
+        let remove_options = RemoveContainerOptions {
+            force: true,
+            ..Default::default()
+        };
+        
+        if let Err(e) = self.docker.remove_container(&container_id, Some(remove_options)).await {
+            eprintln!("⚠ Failed to cleanup container {}: {}", container_id, e);
+        }
         
         outputs
     }
