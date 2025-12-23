@@ -1,0 +1,17 @@
+{
+  "language": "java",
+  "source_code": "class Main {\n    public static void main(String[] args) {\n        java.util.Scanner sc = new java.util.Scanner(System.in);\n        if (sc.hasNextLine()) {\n            String input = sc.nextLine();\n            System.out.println(input);\n        }\n        sc.close();\n    }\n}",
+  "test_cases": [
+    {
+      "input": "Hello World",
+      "expected_output": "Hello World",
+      "weight": 10
+    },
+    {
+      "input": "Test 123",
+      "expected_output": "Test 123",
+      "weight": 10
+    }
+  ],
+  "timeout_ms": 10000
+}

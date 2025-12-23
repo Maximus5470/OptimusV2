@@ -3,6 +3,9 @@ mod evaluator;
 mod executor;
 mod config;
 
+#[cfg(test)]
+mod engine_tests;
+
 use optimus_common::redis;
 use optimus_common::types::Language;
 use optimus_common::config::WorkerConfig;

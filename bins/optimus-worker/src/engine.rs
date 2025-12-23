@@ -94,6 +94,7 @@ pub async fn execute_job_async(
                     execution_time_ms: 0,
                     timed_out: false,
                     runtime_error: true,
+                    compilation_failed: false,
                 }
             }
         };
@@ -473,7 +474,573 @@ impl DockerEngine {
             execution_time_ms,
             timed_out,
             runtime_error,
+            compilation_failed: false,
         })
+    }
+
+    /// Compile code in a container (Phase 2: Compile-once execution)
+    /// 
+    /// This method compiles the source code once and leaves the container running.
+    /// The compiled artifact is ready for multiple test executions.
+    /// 
+    /// ## Arguments
+    /// * `container_id` - ID of the running container
+    /// * `language` - Programming language
+    /// 
+    /// ## Returns
+    /// CompilationResult with success status and compilation output
+    #[tracing::instrument(skip(self), fields(language = %language))]
+    pub async fn compile_in_container(
+        &self,
+        container_id: &str,
+        language: &Language,
+    ) -> Result<crate::evaluator::CompilationResult> {
+        use bollard::exec::{CreateExecOptions, StartExecOptions};
+        
+        let start_time = Instant::now();
+        debug!("Starting compilation for language: {}", language);
+        
+        // Determine compilation command based on language
+        let compile_cmd = match language {
+            Language::Java => vec!["bash", "-c", "javac /code/Main.java 2>&1"],
+            Language::Rust => vec!["bash", "-c", "rustc /code/main.rs -o /code/main 2>&1"],
+            Language::Python => vec!["bash", "-c", "python3 -m py_compile /code/main.py 2>&1"],
+        };
+        
+        // Create exec instance for compilation
+        let exec_config = CreateExecOptions {
+            cmd: Some(compile_cmd),
+            attach_stdout: Some(true),
+            attach_stderr: Some(true),
+            ..Default::default()
+        };
+        
+        let exec = self.docker
+            .create_exec(container_id, exec_config)
+            .await
+            .context("Failed to create exec for compilation")?;
+        
+        // Start compilation
+        let start_config = StartExecOptions {
+            detach: false,
+            ..Default::default()
+        };
+        
+        let output = self.docker.start_exec(&exec.id, Some(start_config)).await?;
+        
+        let mut stdout = String::new();
+        let mut stderr = String::new();
+        
+        // Collect compilation output
+        if let bollard::exec::StartExecResults::Attached { mut output, .. } = output {
+            while let Some(msg) = output.next().await {
+                match msg {
+                    Ok(log_output) => {
+                        match log_output {
+                            LogOutput::StdOut { message } => {
+                                stdout.push_str(&String::from_utf8_lossy(&message));
+                            }
+                            LogOutput::StdErr { message } => {
+                                stderr.push_str(&String::from_utf8_lossy(&message));
+                            }
+                            _ => {}
+                        }
+                    }
+                    Err(e) => {
+                        return Ok(crate::evaluator::CompilationResult::failure(
+                            format!("Failed to read compilation output: {}", e),
+                            start_time.elapsed().as_millis() as u64,
+                        ));
+                    }
+                }
+            }
+        } else {
+            return Ok(crate::evaluator::CompilationResult::failure(
+                "Failed to attach to compilation exec".to_string(),
+                start_time.elapsed().as_millis() as u64,
+            ));
+        }
+        
+        // Check exit code
+        let inspect = self.docker.inspect_exec(&exec.id).await?;
+        let compilation_time_ms = start_time.elapsed().as_millis() as u64;
+        
+        let success = inspect.exit_code == Some(0);
+        
+        if success {
+            println!("    ✓ Compilation successful in {}ms", compilation_time_ms);
+            info!(
+                compilation_time_ms = compilation_time_ms,
+                language = %language,
+                "Compilation succeeded"
+            );
+            Ok(crate::evaluator::CompilationResult::success(compilation_time_ms))
+        } else {
+            println!("    ✗ Compilation failed in {}ms", compilation_time_ms);
+            if !stderr.is_empty() {
+                println!("    Compilation error: {}", stderr.lines().next().unwrap_or(""));
+            }
+            warn!(
+                compilation_time_ms = compilation_time_ms,
+                language = %language,
+                error_preview = stderr.lines().next().unwrap_or(""),
+                "Compilation failed"
+            );
+            Ok(crate::evaluator::CompilationResult::failure(
+                stderr,
+                compilation_time_ms,
+            ))
+        }
+    }
+
+    /// Execute a single test case in an existing container with compiled code
+    /// 
+    /// This method assumes the code has already been compiled and the container
+    /// is running with the compiled artifact ready.
+    /// 
+    /// ## Arguments
+    /// * `container_id` - ID of the running container with compiled code
+    /// * `language` - Programming language
+    /// * `input` - Test input
+    /// * `timeout_ms` - Timeout for this test execution
+    /// 
+    /// ## Returns
+    /// TestExecutionOutput with execution results
+    #[tracing::instrument(skip(self, input), fields(language = %language, timeout_ms = timeout_ms))]
+    pub async fn execute_test_in_container(
+        &self,
+        container_id: &str,
+        language: &Language,
+        input: &str,
+        timeout_ms: u64,
+    ) -> Result<TestExecutionOutput> {
+        use bollard::exec::{CreateExecOptions, StartExecOptions};
+        
+        debug!("Executing test in container with timeout {}ms", timeout_ms);
+        
+        // Validate input size
+        if input.len() > MAX_TEST_INPUT_BYTES {
+            bail!("Test input exceeds maximum size of {} bytes", MAX_TEST_INPUT_BYTES);
+        }
+        
+        let start_time = Instant::now();
+        
+        // Encode input for the runner script
+        let encoded_input = general_purpose::STANDARD.encode(input);
+        
+        // Determine execution command based on language
+        // CRITICAL: Unset JAVA_TOOL_OPTIONS to prevent JVM noise in stderr
+        // Use parentheses to create a subshell so unset doesn't affect the container
+        let java_cmd = format!("(unset JAVA_TOOL_OPTIONS; echo '{}' | base64 -d | java -cp /code Main)", encoded_input);
+        let rust_cmd = format!("echo '{}' | base64 -d | /code/main", encoded_input);
+        let python_cmd = format!("echo '{}' | base64 -d | python3 -u /code/main.py", encoded_input);
+        
+        let exec_cmd = match language {
+            Language::Java => vec!["bash", "-c", &java_cmd],
+            Language::Rust => vec!["bash", "-c", &rust_cmd],
+            Language::Python => vec!["bash", "-c", &python_cmd],
+        };
+        
+        // Create exec instance for test execution
+        let exec_config = CreateExecOptions {
+            cmd: Some(exec_cmd.iter().map(|s| s.to_string()).collect()),
+            attach_stdin: Some(true),
+            attach_stdout: Some(true),
+            attach_stderr: Some(true),
+            ..Default::default()
+        };
+        
+        let exec = self.docker
+            .create_exec(container_id, exec_config)
+            .await
+            .context("Failed to create exec for test execution")?;
+        
+        // Start execution with timeout
+        let start_config = StartExecOptions {
+            detach: false,
+            ..Default::default()
+        };
+        
+        let timeout_duration = Duration::from_millis(timeout_ms);
+        let mut timed_out = false;
+        let mut runtime_error = false;
+        
+        let execution_future = async {
+            let output = self.docker.start_exec(&exec.id, Some(start_config)).await?;
+            
+            let mut stdout = String::new();
+            let mut stderr = String::new();
+            
+            // Collect execution output
+            if let bollard::exec::StartExecResults::Attached { mut output, .. } = output {
+                while let Some(msg) = output.next().await {
+                    match msg {
+                        Ok(log_output) => {
+                            match log_output {
+                                LogOutput::StdOut { message } => {
+                                    stdout.push_str(&String::from_utf8_lossy(&message));
+                                }
+                                LogOutput::StdErr { message } => {
+                                    stderr.push_str(&String::from_utf8_lossy(&message));
+                                }
+                                _ => {}
+                            }
+                        }
+                        Err(e) => {
+                            stderr.push_str(&format!("\n[Execution error: {}]", e));
+                            break;
+                        }
+                    }
+                }
+            }
+            
+            // Get exit code
+            let inspect = self.docker.inspect_exec(&exec.id).await?;
+            let exit_code = inspect.exit_code;
+            
+            Ok::<(String, String, Option<i64>), anyhow::Error>((stdout, stderr, exit_code))
+        };
+        
+        // Execute with timeout
+        let timeout_result = tokio::time::timeout(timeout_duration, execution_future).await;
+        
+        let (stdout, stderr, _exit_code) = match timeout_result {
+            Ok(Ok((out, err, code))) => {
+                // Check exit code for runtime errors
+                if let Some(code) = code {
+                    if code != 0 {
+                        runtime_error = true;
+                    }
+                }
+                (out, err, code)
+            }
+            Ok(Err(e)) => {
+                // Execution error
+                runtime_error = true;
+                (String::new(), format!("Execution failed: {}", e), None)
+            }
+            Err(_) => {
+                // Timeout
+                timed_out = true;
+                (String::new(), "[Execution timed out]".to_string(), None)
+            }
+        };
+        
+        let execution_time_ms = start_time.elapsed().as_millis() as u64;
+        
+        // Log execution metrics
+        if timed_out {
+            warn!(
+                execution_time_ms = execution_time_ms,
+                timeout_ms = timeout_ms,
+                "Test execution timed out"
+            );
+        } else if runtime_error {
+            warn!(
+                execution_time_ms = execution_time_ms,
+                "Test execution had runtime error"
+            );
+        } else {
+            debug!(
+                execution_time_ms = execution_time_ms,
+                "Test execution completed successfully"
+            );
+        }
+        
+        Ok(TestExecutionOutput {
+            test_id: 0, // Will be set by caller
+            stdout,
+            stderr,
+            execution_time_ms,
+            timed_out,
+            runtime_error,
+            compilation_failed: false,
+        })
+    }
+
+    /// Execute a complete job in a single container (Phase 2: Compile-once execution)
+    /// 
+    /// This is the new execution path that:
+    /// 1. Creates one container
+    /// 2. Compiles code once
+    /// 3. Executes all test cases against the compiled artifact
+    /// 4. Cleans up the container
+    /// 
+    /// ## Arguments
+    /// * `job` - The job request with source code and test cases
+    /// * `redis_conn` - Redis connection for cancellation checks
+    /// 
+    /// ## Returns
+    /// Vector of test execution outputs (one per test case)
+    #[tracing::instrument(
+        skip(self, job, redis_conn),
+        fields(
+            job_id = %job.id,
+            language = %job.language,
+            test_count = job.test_cases.len(),
+            execution_mode = "compile_once"
+        )
+    )]
+    pub async fn execute_job_in_single_container(
+        &self,
+        job: &JobRequest,
+        redis_conn: &mut redis::aio::ConnectionManager,
+    ) -> Vec<TestExecutionOutput> {
+        let job_start_time = std::time::Instant::now();
+        
+        println!("→ Starting compile-once execution for job {}", job.id);
+        println!("  Language: {}", job.language);
+        println!("  Test cases: {}", job.test_cases.len());
+        println!();
+        
+        info!(
+            job_id = %job.id,
+            language = %job.language,
+            test_count = job.test_cases.len(),
+            "Starting compile-once job execution"
+        );
+
+        // Check for early cancellation
+        match optimus_common::redis::is_job_cancelled(redis_conn, &job.id).await {
+            Ok(true) => {
+                println!("  ⚠ Job cancelled before execution");
+                return Vec::new();
+            }
+            Err(e) => {
+                eprintln!("  ⚠ Failed to check cancellation: {}", e);
+            }
+            _ => {}
+        }
+
+        let image = self.get_image_name(&job.language);
+        let container_name = format!("optimus-{}", uuid::Uuid::new_v4());
+
+        // Ensure image is available
+        if let Err(e) = self.ensure_image(&image).await {
+            eprintln!("  ✗ Failed to ensure image: {}", e);
+            return self.create_compilation_error_outputs(&job.test_cases, &format!("Failed to pull image: {}", e));
+        }
+
+        // Prepare environment - write source code to container
+        let env = vec![
+            format!("SOURCE_CODE={}", general_purpose::STANDARD.encode(&job.source_code)),
+            format!("LANGUAGE={}", format!("{}", job.language).to_lowercase()),
+        ];
+
+        let memory_limit = self.get_memory_limit(&job.language);
+        let cpu_limit = self.get_cpu_limit(&job.language);
+
+        // Create container configuration
+        let config = Config {
+            image: Some(image.clone()),
+            cmd: Some(vec!["/bin/bash".to_string(), "-c".to_string(), "sleep 300".to_string()]), // Keep container alive with bash
+            entrypoint: Some(vec![]),  // Override entrypoint to avoid runner.sh
+            env: Some(env),
+            attach_stdout: Some(true),
+            attach_stderr: Some(true),
+            network_disabled: Some(true),
+            host_config: Some(bollard::models::HostConfig {
+                memory: Some(memory_limit),
+                nano_cpus: Some(cpu_limit),
+                readonly_rootfs: Some(false),
+                ..Default::default()
+            }),
+            working_dir: Some("/code".to_string()),
+            ..Default::default()
+        };
+
+        // Create container
+        let create_options = CreateContainerOptions {
+            name: container_name.as_str(),
+            platform: None,
+        };
+
+        let container = match self.docker.create_container(Some(create_options), config).await {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("  ✗ Failed to create container: {}", e);
+                return self.create_compilation_error_outputs(&job.test_cases, &format!("Container creation failed: {}", e));
+            }
+        };
+
+        let container_id = container.id.clone();
+        let _guard = ContainerGuard::new(&self.docker, container_id.clone());
+
+        // Start container
+        if let Err(e) = self.docker.start_container(&container_id, None::<StartContainerOptions<String>>).await {
+            eprintln!("  ✗ Failed to start container: {}", e);
+            return self.create_compilation_error_outputs(&job.test_cases, &format!("Container start failed: {}", e));
+        }
+
+        // Write source code to container
+        if let Err(e) = self.write_source_to_container(&container_id, &job.language, &job.source_code).await {
+            eprintln!("  ✗ Failed to write source code: {}", e);
+            return self.create_compilation_error_outputs(&job.test_cases, &format!("Source write failed: {}", e));
+        }
+
+        println!("→ Compiling source code...");
+        
+        // Step 1: Compile code
+        let compilation_result = match self.compile_in_container(&container_id, &job.language).await {
+            Ok(result) => result,
+            Err(e) => {
+                eprintln!("  ✗ Compilation process failed: {}", e);
+                return self.create_compilation_error_outputs(&job.test_cases, &format!("Compilation process error: {}", e));
+            }
+        };
+
+        // If compilation failed, return all tests as failed
+        if !compilation_result.success {
+            println!("  ✗ Compilation failed - marking all tests as failed");
+            return self.create_compilation_error_outputs(&job.test_cases, &compilation_result.stderr);
+        }
+
+        println!();
+        println!("→ Executing {} test cases against compiled artifact", job.test_cases.len());
+        println!();
+
+        // Step 2: Execute all test cases
+        let mut outputs = Vec::new();
+
+        for (idx, test_case) in job.test_cases.iter().enumerate() {
+            // Check for cancellation between tests
+            match optimus_common::redis::is_job_cancelled(redis_conn, &job.id).await {
+                Ok(true) => {
+                    println!("  ⚠ Job cancelled - stopping at test {}/{}", idx + 1, job.test_cases.len());
+                    break;
+                }
+                Err(e) => {
+                    eprintln!("  ⚠ Failed to check cancellation: {}", e);
+                }
+                _ => {}
+            }
+
+            println!("  Executing test {} (id: {})", idx + 1, test_case.id);
+
+            let result = self.execute_test_in_container(
+                &container_id,
+                &job.language,
+                &test_case.input,
+                job.timeout_ms,
+            ).await;
+
+            let mut output = match result {
+                Ok(output) => output,
+                Err(e) => {
+                    eprintln!("    ✗ Test execution error: {}", e);
+                    TestExecutionOutput {
+                        test_id: test_case.id,
+                        stdout: String::new(),
+                        stderr: format!("Test execution error: {}", e),
+                        execution_time_ms: 0,
+                        timed_out: false,
+                        runtime_error: true,
+                        compilation_failed: false,
+                    }
+                }
+            };
+
+            output.test_id = test_case.id;
+
+            println!("    Execution time: {}ms", output.execution_time_ms);
+            if output.timed_out {
+                println!("    ⚠ Timed out");
+            }
+            if output.runtime_error {
+                println!("    ✗ Runtime error");
+            }
+            if !output.stderr.is_empty() && !output.runtime_error && !output.timed_out {
+                println!("    stderr: {}", output.stderr.lines().next().unwrap_or(""));
+            }
+
+            outputs.push(output);
+        }
+
+        println!();
+        println!("→ All test cases executed (compile-once mode)");
+        
+        let total_execution_time_ms = job_start_time.elapsed().as_millis() as u64;
+        let successful_tests = outputs.iter().filter(|o| !o.runtime_error && !o.timed_out && !o.compilation_failed).count();
+        
+        info!(
+            job_id = %job.id,
+            total_execution_time_ms = total_execution_time_ms,
+            tests_executed = outputs.len(),
+            tests_successful = successful_tests,
+            tests_failed = outputs.len() - successful_tests,
+            "Completed compile-once job execution"
+        );
+        
+        outputs
+    }
+
+    /// Helper to write source code to container filesystem
+    async fn write_source_to_container(
+        &self,
+        container_id: &str,
+        language: &Language,
+        source_code: &str,
+    ) -> Result<()> {
+        use bollard::exec::{CreateExecOptions, StartExecOptions};
+        
+        let filename = match language {
+            Language::Java => "Main.java",
+            Language::Rust => "main.rs",
+            Language::Python => "main.py",
+        };
+        
+        // Write file using echo command (simple approach for now)
+        let encoded_content = general_purpose::STANDARD.encode(source_code);
+        let write_command = format!("echo '{}' | base64 -d > /code/{}", encoded_content, filename);
+        let write_cmd = vec!["bash", "-c", &write_command];
+        
+        let exec_config = CreateExecOptions {
+            cmd: Some(write_cmd.iter().map(|s| s.to_string()).collect()),
+            attach_stdout: Some(true),
+            attach_stderr: Some(true),
+            ..Default::default()
+        };
+        
+        let exec = self.docker.create_exec(container_id, exec_config).await?;
+        
+        let start_config = StartExecOptions {
+            detach: false,
+            ..Default::default()
+        };
+        
+        let output = self.docker.start_exec(&exec.id, Some(start_config)).await?;
+        
+        // Wait for write to complete
+        if let bollard::exec::StartExecResults::Attached { mut output, .. } = output {
+            while let Some(_) = output.next().await {
+                // Drain the stream
+            }
+        }
+        
+        // Check if write succeeded
+        let inspect = self.docker.inspect_exec(&exec.id).await?;
+        if inspect.exit_code != Some(0) {
+            bail!("Failed to write source code to container");
+        }
+        
+        Ok(())
+    }
+
+    /// Helper to create compilation error outputs for all test cases
+    fn create_compilation_error_outputs(
+        &self,
+        test_cases: &[optimus_common::types::TestCase],
+        error_message: &str,
+    ) -> Vec<TestExecutionOutput> {
+        test_cases.iter().map(|tc| TestExecutionOutput {
+            test_id: tc.id,
+            stdout: String::new(),
+            stderr: error_message.to_string(),
+            execution_time_ms: 0,
+            timed_out: false,
+            runtime_error: false,
+            compilation_failed: true,
+        }).collect()
     }
 }
 

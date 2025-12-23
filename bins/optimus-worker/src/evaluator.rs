@@ -30,8 +30,47 @@ use optimus_common::types::{
     ExecutionResult, JobRequest, JobStatus, TestCase, TestResult, TestStatus,
 };
 
+/// Result of code compilation phase
+/// Tracks whether compilation succeeded or failed
+#[derive(Debug, Clone)]
+#[allow(dead_code)] // Will be used in Phase 2
+pub struct CompilationResult {
+    pub success: bool,
+    pub stdout: String,
+    pub stderr: String,
+    pub compilation_time_ms: u64,
+}
+
+impl CompilationResult {
+    /// Create a successful compilation result
+    #[allow(dead_code)] // Will be used in Phase 2
+    pub fn success(compilation_time_ms: u64) -> Self {
+        Self {
+            success: true,
+            stdout: String::new(),
+            stderr: String::new(),
+            compilation_time_ms,
+        }
+    }
+
+    /// Create a failed compilation result
+    #[allow(dead_code)] // Will be used in Phase 2
+    pub fn failure(stderr: String, compilation_time_ms: u64) -> Self {
+        Self {
+            success: false,
+            stdout: String::new(),
+            stderr,
+            compilation_time_ms,
+        }
+    }
+}
+
 /// Raw execution output for a single test case
 /// Produced by ExecutionEngine, consumed by Evaluator
+/// 
+/// **Execution Model:**
+/// - For compiled languages: compilation happens once, then all tests execute
+/// - For interpreted languages: compilation phase is optional (syntax check)
 #[derive(Debug, Clone)]
 pub struct TestExecutionOutput {
     pub test_id: u32,
@@ -40,6 +79,9 @@ pub struct TestExecutionOutput {
     pub execution_time_ms: u64,
     pub timed_out: bool,
     pub runtime_error: bool,
+    /// Indicates if this test failed due to compilation error
+    /// (compilation happens once per job, not per test)
+    pub compilation_failed: bool,
 }
 
 /// Normalize output string for comparison
@@ -71,7 +113,11 @@ fn normalize_output(output: &str) -> &str {
 /// ## Returns
 /// TestResult with status and execution details
 pub fn evaluate_test(output: &TestExecutionOutput, test_case: &TestCase) -> TestResult {
-    let status = if output.runtime_error {
+    let status = if output.compilation_failed {
+        // Compilation failure is treated as runtime error
+        // All tests fail if compilation fails
+        TestStatus::RuntimeError
+    } else if output.runtime_error {
         TestStatus::RuntimeError
     } else if output.timed_out {
         TestStatus::TimeLimitExceeded
@@ -242,6 +288,7 @@ mod tests {
             execution_time_ms: exec_time,
             timed_out: false,
             runtime_error: false,
+            compilation_failed: false,
         }
     }
 
@@ -298,6 +345,7 @@ mod tests {
             execution_time_ms: 5,
             timed_out: false,
             runtime_error: true,
+            compilation_failed: false,
         };
 
         let result = evaluate_test(&output, &test_case);
@@ -315,6 +363,7 @@ mod tests {
             execution_time_ms: 1001,
             timed_out: true,
             runtime_error: false,
+            compilation_failed: false,
         };
 
         let result = evaluate_test(&output, &test_case);
@@ -354,6 +403,7 @@ mod tests {
                 execution_time_ms: 42,
                 timed_out: false,
                 runtime_error: false,
+                compilation_failed: false,
             },
             TestExecutionOutput {
                 test_id: 2,
@@ -362,6 +412,7 @@ mod tests {
                 execution_time_ms: 38,
                 timed_out: false,
                 runtime_error: false,
+                compilation_failed: false,
             },
         ];
 
@@ -406,6 +457,7 @@ mod tests {
                 execution_time_ms: 10,
                 timed_out: false,
                 runtime_error: false,
+                compilation_failed: false,
             },
             TestExecutionOutput {
                 test_id: 2,
@@ -414,6 +466,7 @@ mod tests {
                 execution_time_ms: 10,
                 timed_out: false,
                 runtime_error: false,
+                compilation_failed: false,
             },
         ];
 
@@ -477,6 +530,7 @@ mod tests {
             execution_time_ms: 5,
             timed_out: false,
             runtime_error: true,
+            compilation_failed: false,
         }];
 
         let result = evaluate(&job, outputs);
@@ -509,6 +563,7 @@ mod tests {
             execution_time_ms: 1001,
             timed_out: true,
             runtime_error: false,
+            compilation_failed: false,
         }];
 
         let result = evaluate(&job, outputs);
@@ -541,6 +596,7 @@ mod tests {
             execution_time_ms: 5,
             timed_out: false,
             runtime_error: false,
+            compilation_failed: false,
         }];
 
         let result = evaluate(&job, outputs);
@@ -635,6 +691,7 @@ mod tests {
                 execution_time_ms: 1001,
                 timed_out: true,
                 runtime_error: false,
+                compilation_failed: false,
             },
             TestExecutionOutput {
                 test_id: 4,
@@ -643,6 +700,7 @@ mod tests {
                 execution_time_ms: 50,
                 timed_out: false,
                 runtime_error: true,
+                compilation_failed: false,
             },
         ];
 
@@ -731,6 +789,7 @@ mod tests {
             stdout: "correct output".to_string(), // Matches expected!
             stderr: "Traceback (most recent call last):\n  File \"test.py\", line 1\nZeroDivisionError".to_string(),
             execution_time_ms: 10,
+            compilation_failed: false,
         };
 
         let result = evaluate_test(&exec, &test_case);
@@ -755,6 +814,7 @@ mod tests {
             stdout: "correct output".to_string(), // Matches expected!
             stderr: String::new(),
             execution_time_ms: 5001,
+            compilation_failed: false,
         };
 
         let result = evaluate_test(&exec, &test_case);
@@ -776,6 +836,7 @@ mod tests {
             stdout: "expected".to_string(),
             stderr: String::new(),
             execution_time_ms: 42,
+            compilation_failed: false,
         };
 
         let result = evaluate_test(&exec, &test_case);
@@ -797,6 +858,7 @@ mod tests {
             stdout: String::new(),
             stderr: "Error".to_string(),
             execution_time_ms: 5001,
+            compilation_failed: false,
         };
 
         let result = evaluate_test(&exec, &test_case);
@@ -826,6 +888,7 @@ mod tests {
             stdout: "output".to_string(), // Even though output matches
             stderr: "RuntimeError".to_string(),
             execution_time_ms: 10,
+            compilation_failed: false,
         }];
 
         let result = evaluate(&job, outputs);
@@ -856,6 +919,7 @@ mod tests {
             stdout: "output".to_string(), // Even though output matches
             stderr: String::new(),
             execution_time_ms: 1001,
+            compilation_failed: false,
         }];
 
         let result = evaluate(&job, outputs);
@@ -890,6 +954,7 @@ mod tests {
                 stdout: "output2".to_string(),
                 stderr: "Error".to_string(),
                 execution_time_ms: 10,
+                compilation_failed: false,
             },
             TestExecutionOutput { // Timeout - even with correct output
                 test_id: 3,
@@ -898,6 +963,7 @@ mod tests {
                 stdout: "output3".to_string(),
                 stderr: String::new(),
                 execution_time_ms: 5001,
+                compilation_failed: false,
             },
         ];
 
@@ -909,5 +975,51 @@ mod tests {
         assert_eq!(result.results[0].status, TestStatus::Passed);
         assert_eq!(result.results[1].status, TestStatus::RuntimeError);
         assert_eq!(result.results[2].status, TestStatus::TimeLimitExceeded);
+    }
+
+    /// Test that compilation failure marks all tests as RuntimeError
+    #[test]
+    fn test_compilation_failure_marks_all_tests_as_failed() {
+        let test_case = make_test_case(1, "expected output", 10);
+        
+        // Test output marked as compilation failed
+        let output = TestExecutionOutput {
+            test_id: 1,
+            stdout: String::new(),
+            stderr: "error: expected `;`, found `}`\n --> main.rs:5:1".to_string(),
+            execution_time_ms: 0,
+            timed_out: false,
+            runtime_error: false,
+            compilation_failed: true,
+        };
+
+        let result = evaluate_test(&output, &test_case);
+
+        // Compilation failure should be treated as RuntimeError
+        assert_eq!(result.status, TestStatus::RuntimeError,
+            "Compilation failure should result in RuntimeError status");
+        assert!(result.stderr.contains("error:"));
+    }
+
+    /// Test that compilation failure takes precedence over correct output
+    #[test]
+    fn test_compilation_failure_precedence() {
+        let test_case = make_test_case(1, "correct output", 10);
+        
+        // Has correct output but compilation failed
+        let output = TestExecutionOutput {
+            test_id: 1,
+            stdout: "correct output".to_string(), // Even with correct output
+            stderr: "compilation error: syntax error".to_string(),
+            execution_time_ms: 0,
+            timed_out: false,
+            runtime_error: false,
+            compilation_failed: true,
+        };
+
+        let result = evaluate_test(&output, &test_case);
+
+        assert_eq!(result.status, TestStatus::RuntimeError,
+            "Compilation failure must take precedence even with correct output");
     }
 }
