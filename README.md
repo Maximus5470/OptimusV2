@@ -1,11 +1,11 @@
-# 🚀 Optimus
+#  Optimus
 
 **A high-performance distributed code execution platform** built with Rust, Redis, and Docker. Execute code in multiple programming languages with sandboxed environments, automatic resource management, and horizontal scalability.
 
-## ✨ Features
+##  Features
 
 - **Multi-Language Support**: Python, Java, Rust (easily extensible)
-- **Compile-Once Execution**: 🆕 Compile code once, run all tests (2-4x faster for compiled languages)
+- **Compile-Once Execution**:  Compile code once, run all tests (2-4x faster for compiled languages)
 - **Universal Runner**: Single `runner.sh` script handles all languages
 - **Docker Isolation**: Sandboxed execution with resource limits
 - **Redis Queue**: Reliable job distribution and cancellation support
@@ -13,7 +13,7 @@
 - **CLI Management**: Easy language addition and image building
 - **Type-Safe**: Built with Rust for performance and reliability
 
-## 🏗️ Architecture
+##  Architecture
 
 ```
 ┌─────────────┐         ┌──────────────┐         ┌────────────────┐
@@ -36,7 +36,7 @@
 - **optimus-cli**: Language management CLI for adding languages and building Docker images
 - **optimus-common**: Shared types, Redis client logic, and configuration utilities
 
-## 🚀 Quick Start
+##  Quick Start
 
 ### Automated Setup (Recommended)
 
@@ -84,19 +84,19 @@ docker run -d --name optimus-redis -p 6379:6379 redis:8-alpine
 
 ```bash
 # Add Python
-./target/release/optimus-cli add-lang --name python --ext py --version 3.11-slim
+./target/release/optimus-cli add-lang --name python --ext py --version latest --memory 512 --cpu 1.0
 
 # Add Java
-./target/release/optimus-cli add-lang --name java --ext java --version 17 --memory 512 --cpu 1.0
+./target/release/optimus-cli add-lang --name java --ext java --version latest --memory 512 --cpu 1.0
 
 # Add Rust
-./target/release/optimus-cli add-lang --name rust --ext rs --version 1.75-slim --memory 512 --cpu 1.0
+./target/release/optimus-cli add-lang --name rust --ext rs --version latest --memory 512 --cpu 1.0
 
 # List configured languages
 ./target/release/optimus-cli list-langs
 ```
 
-## 🎯 Usage
+##  Usage
 
 ### Start the System
 
@@ -122,7 +122,7 @@ docker run -d --name optimus-redis -p 6379:6379 redis:8-alpine
 
 **Using curl:**
 ```bash
-curl -X POST http://localhost:8080/jobs \
+curl -X POST http://localhost:<PORT>/jobs \
   -H "Content-Type: application/json" \
   -d '{
     "language": "python",
@@ -137,7 +137,7 @@ curl -X POST http://localhost:8080/jobs \
 **Using PowerShell:**
 ```powershell
 $job = Get-Content test_job.json
-Invoke-RestMethod -Method POST -Uri http://localhost:8080/jobs -Body $job -ContentType 'application/json'
+Invoke-RestMethod -Method POST -Uri http://localhost:<PORT>/jobs -Body $job -ContentType 'application/json'
 ```
 
 **Response:**
@@ -151,7 +151,7 @@ Invoke-RestMethod -Method POST -Uri http://localhost:8080/jobs -Body $job -Conte
 ### Check Job Status
 
 ```bash
-curl http://localhost:8080/jobs/{job_id}
+curl http://localhost:\<PORT\>/jobs/{job_id}
 ```
 
 **Response:**
@@ -179,10 +179,10 @@ curl http://localhost:8080/jobs/{job_id}
 ### Cancel a Running Job
 
 ```bash
-curl -X DELETE http://localhost:8080/jobs/{job_id}
+curl -X DELETE http://localhost:\<PORT\>/jobs/{job_id}
 ```
 
-## 📁 Project Structure
+##  Project Structure
 
 ```
 OptimusV2/
@@ -207,7 +207,7 @@ OptimusV2/
 └── Cargo.toml                # Workspace configuration
 ```
 
-## 🛠️ CLI Reference
+##  CLI Reference
 
 ### Add a Language
 
@@ -244,7 +244,7 @@ optimus-cli list-langs
 optimus-cli build-image --name <language> [--no-cache]
 ```
 
-## 🐳 Universal Runner Architecture
+##  Universal Runner Architecture
 
 Optimus uses a **single universal runner script** (`dockerfiles/runner.sh`) that handles all programming languages. This eliminates the need for language-specific runners and simplifies Docker image creation.
 
@@ -259,12 +259,12 @@ Optimus uses a **single universal runner script** (`dockerfiles/runner.sh`) that
    - Captures stdout/stderr
 
 **Benefits:**
-- ✅ Single source of truth for execution logic
-- ✅ Easy to add new languages (just update `runner.sh`)
-- ✅ No language-specific runner maintenance
-- ✅ Consistent error handling across all languages
+-  Single source of truth for execution logic
+-  Easy to add new languages (just update `runner.sh`)
+-  No language-specific runner maintenance
+-  Consistent error handling across all languages
 
-## 🔧 Configuration
+##  Configuration
 
 ### Language Configuration (`config/languages.json`)
 
@@ -273,8 +273,8 @@ Optimus uses a **single universal runner script** (`dockerfiles/runner.sh`) that
   "languages": [
     {
       "name": "python",
-      "version": "3.11-slim",
-      "image": "optimus-python:3.11-slim-v1",
+      "version": "latest",
+      "image": "optimus-python:latest",
       "dockerfile_path": "dockerfiles/python/Dockerfile",
       "execution": {
         "command": "python",
@@ -312,7 +312,7 @@ WORKER_LANGUAGE=python
 WORKER_CONCURRENCY=4
 ```
 
-## 📊 Monitoring
+##  Monitoring
 
 ### View Logs
 
@@ -350,7 +350,7 @@ docker logs <container-id>
 docker stats
 ```
 
-## 🚀 Adding a New Language
+##  Adding a New Language
 
 ### Example: Adding Go
 
@@ -375,7 +375,7 @@ go)
 
 That's it! The CLI generates the Dockerfile, builds the image, and the universal runner handles execution.
 
-## ⚡ Performance Optimization
+##  Performance Optimization
 
 ### Compile-Once Execution (NEW)
 
@@ -405,11 +405,11 @@ kubectl rollout restart deployment/optimus-worker
 - Container lifecycle is optimized (1 container per job)
 
 **Documentation:**
-- 📖 [Complete Migration Guide](./COMPILE_ONCE_MIGRATION.md)
-- 📋 [Quick Reference Card](./COMPILE_ONCE_QUICKREF.md)
-- 📊 [Performance Benchmarks](./benchmark_compile_once.ps1)
+-  [Complete Migration Guide](./COMPILE_ONCE_MIGRATION.md)
+-  [Quick Reference Card](./COMPILE_ONCE_QUICKREF.md)
+-  [Performance Benchmarks](./benchmark_compile_once.ps1)
 
-## 📚 API Reference
+##  API Reference
 
 ### POST /jobs
 Submit a code execution job
@@ -435,15 +435,15 @@ Cancel a running job
 ### GET /health
 Health check endpoint
 
-## 🤝 Contributing
+##  Contributing
 
 Contributions are welcome! Please feel free to submit a Pull Request.
 
-## 📝 License
+##  License
 
 MIT License - see LICENSE file for details
 
-## 🙏 Acknowledgments
+##  Acknowledgments
 
 Built with:
 - [Rust](https://www.rust-lang.org/) - Systems programming language

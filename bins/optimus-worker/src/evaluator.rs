@@ -90,6 +90,29 @@ fn normalize_output(output: &str) -> &str {
     output.trim()
 }
 
+/// Filter out JVM informational messages from stderr
+///
+/// The JVM prints informational messages to stderr when picking up JAVA_TOOL_OPTIONS.
+/// These are not errors and should not cause test failures.
+///
+/// ## Arguments
+/// * `stderr` - Raw stderr output
+///
+/// ## Returns
+/// Filtered stderr with JVM informational messages removed
+fn filter_jvm_noise(stderr: &str) -> String {
+    stderr
+        .lines()
+        .filter(|line| {
+            !line.contains("Picked up JAVA_TOOL_OPTIONS:")
+                && !line.contains("Picked up _JAVA_OPTIONS:")
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+        .trim()
+        .to_string()
+}
+
 /// Evaluate a single test case execution output
 ///
 /// This function determines the TestStatus based on:
@@ -104,6 +127,9 @@ fn normalize_output(output: &str) -> &str {
 /// ## Returns
 /// TestResult with status and execution details
 pub fn evaluate_test(output: &TestExecutionOutput, test_case: &TestCase) -> TestResult {
+    // Filter out JVM informational noise from stderr before evaluation
+    let filtered_stderr = filter_jvm_noise(&output.stderr);
+    
     let status = if output.compilation_failed {
         // Compilation failure is treated as runtime error
         // All tests fail if compilation fails
@@ -112,7 +138,7 @@ pub fn evaluate_test(output: &TestExecutionOutput, test_case: &TestCase) -> Test
         TestStatus::RuntimeError
     } else if output.timed_out {
         TestStatus::TimeLimitExceeded
-    } else if !output.stderr.trim().is_empty() {
+    } else if !filtered_stderr.is_empty() {
         // Any output to stderr indicates an error/warning - mark as failed
         TestStatus::Failed
     } else {

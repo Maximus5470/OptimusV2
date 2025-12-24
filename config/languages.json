@@ -2,8 +2,8 @@
   "languages": [
     {
       "name": "python",
-      "version": "3.11-slim",
-      "image": "optimus-python:3.11-slim",
+      "version": "latest",
+      "image": "optimus-python:latest",
       "dockerfile_path": "dockerfiles/python/Dockerfile",
       "execution": {
         "command": "python",
@@ -30,8 +30,8 @@
     },
     {
       "name": "java",
-      "version": "17",
-      "image": "optimus-java:17",
+      "version": "latest",
+      "image": "optimus-java:latest",
       "dockerfile_path": "dockerfiles/java/Dockerfile",
       "execution": {
         "command": "java",
@@ -58,8 +58,8 @@
     },
     {
       "name": "rust",
-      "version": "1.75-slim",
-      "image": "optimus-rust:1.75-slim",
+      "version": "latest",
+      "image": "optimus-rust:latest",
       "dockerfile_path": "dockerfiles/rust/Dockerfile",
       "execution": {
         "command": "rustc",
