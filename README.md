@@ -151,7 +151,7 @@ Invoke-RestMethod -Method POST -Uri http://localhost:<PORT>/jobs -Body $job -Con
 ### Check Job Status
 
 ```bash
-curl http://localhost:\<PORT\>/jobs/{job_id}
+curl http://localhost:<PORT>/jobs/{job_id}
 ```
 
 **Response:**
@@ -179,7 +179,7 @@ curl http://localhost:\<PORT\>/jobs/{job_id}
 ### Cancel a Running Job
 
 ```bash
-curl -X DELETE http://localhost:\<PORT\>/jobs/{job_id}
+curl -X DELETE http://localhost:<PORT>/jobs/{job_id}
 ```
 
 ##  Project Structure
