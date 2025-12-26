@@ -54,6 +54,10 @@ out/
 *.secret.yaml
 secrets/
 
+# Generated Kubernetes manifests (rendered from templates)
+k8s/workers/
+k8s/keda/scaled-object-*.yaml
+
 # Testing
 coverage/
 .coverage
@@ -101,8 +105,17 @@ env/
 *.a
 *.class
 
-# Markdown files (except README.md)
+# Docker build artifacts
+.dockerignore
+
+# Generated Dockerfiles (if CLI generates them)
+# dockerfiles/*/Dockerfile
+# Uncomment above if you want to exclude generated Dockerfiles
+
+# Markdown files (except README.md and docs)
 *.md
 !README.md
+!docs/**/*.md
+!k8s/keda/README.md
 
 tests/

@@ -24,8 +24,8 @@
         }
       },
       "concurrency": {
-        "max_parallel_jobs": 3,
-        "max_parallel_tests": 5
+        "max_parallel_jobs": 34,
+        "max_parallel_tests": 14
       }
     },
     {
@@ -52,8 +52,8 @@
         }
       },
       "concurrency": {
-        "max_parallel_jobs": 2,
-        "max_parallel_tests": 3
+        "max_parallel_jobs": 28,
+        "max_parallel_tests": 12
       }
     },
     {
@@ -80,8 +80,8 @@
         }
       },
       "concurrency": {
-        "max_parallel_jobs": 2,
-        "max_parallel_tests": 3
+        "max_parallel_jobs": 12,
+        "max_parallel_tests": 8
       }
     }
   ]

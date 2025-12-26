@@ -1,10 +1,12 @@
 // CLI commands for managing Optimus
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use handlebars::Handlebars;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LanguageExecution {
@@ -685,3 +687,117 @@ pub async fn build_docker_image(name: &str, no_cache: bool) -> Result<()> {
     
     Ok(())
 }
+
+/// Render Kubernetes manifests from templates for all configured languages
+pub async fn render_k8s_manifests() -> Result<()> {
+    println!("📊 Rendering Kubernetes manifests from templates...\n");
+    
+    // Load languages config
+    let languages_json = load_languages_config()?;
+    
+    if languages_json.languages.is_empty() {
+        bail!("No languages configured. Add a language first with: optimus-cli add-lang");
+    }
+    
+    // Create handlebars registry
+    let mut handlebars = Handlebars::new();
+    handlebars.set_strict_mode(true);
+    
+    // Read template files
+    let worker_template = fs::read_to_string("config/templates/worker-deployment.yaml.tmpl")
+        .context("Failed to read worker-deployment.yaml.tmpl")?;
+    let scaled_object_template = fs::read_to_string("config/templates/scaled-object.yaml.tmpl")
+        .context("Failed to read scaled-object.yaml.tmpl")?;
+    let scaled_object_retry_template = fs::read_to_string("config/templates/scaled-object-retry.yaml.tmpl")
+        .context("Failed to read scaled-object-retry.yaml.tmpl")?;
+    
+    // Register templates
+    handlebars.register_template_string("worker", &worker_template)?;
+    handlebars.register_template_string("scaled_object", &scaled_object_template)?;
+    handlebars.register_template_string("scaled_object_retry", &scaled_object_retry_template)?;
+    
+    // Ensure output directories exist
+    fs::create_dir_all("k8s/workers")
+        .context("Failed to create k8s/workers directory")?;
+    fs::create_dir_all("k8s/keda")
+        .context("Failed to create k8s/keda directory")?;
+    
+    let mut generated_files = Vec::new();
+    
+    // Render manifests for each language
+    for lang in &languages_json.languages {
+        println!("🔧 Rendering manifests for: {}", lang.name);
+        
+        // Prepare template data
+        let data = json!({
+            "language": lang.name,
+            "queue_name": lang.queue_name,
+            "image": lang.image,
+            "memory_request": lang.resources.requests.memory,
+            "memory_limit": lang.resources.limits.memory,
+            "cpu_request": lang.resources.requests.cpu,
+            "cpu_limit": lang.resources.limits.cpu,
+            "max_parallel_jobs": lang.concurrency.max_parallel_jobs,
+            "max_parallel_tests": lang.concurrency.max_parallel_tests,
+        });
+        
+        // Render worker deployment
+        let worker_yaml = handlebars.render("worker", &data)
+            .context(format!("Failed to render worker deployment for {}", lang.name))?;
+        let worker_path = format!("k8s/workers/worker-deployment-{}.yaml", lang.name);
+        fs::write(&worker_path, worker_yaml)
+            .context(format!("Failed to write {}", worker_path))?;
+        
+        // Render main queue ScaledObject
+        let scaled_object_yaml = handlebars.render("scaled_object", &data)
+            .context(format!("Failed to render ScaledObject for {}", lang.name))?;
+        let scaled_object_path = format!("k8s/keda/scaled-object-{}.yaml", lang.name);
+        fs::write(&scaled_object_path, scaled_object_yaml)
+            .context(format!("Failed to write {}", scaled_object_path))?;
+        
+        // Render retry queue ScaledObject
+        let scaled_object_retry_yaml = handlebars.render("scaled_object_retry", &data)
+            .context(format!("Failed to render retry ScaledObject for {}", lang.name))?;
+        let scaled_object_retry_path = format!("k8s/keda/scaled-object-{}-retry.yaml", lang.name);
+        fs::write(&scaled_object_retry_path, scaled_object_retry_yaml)
+            .context(format!("Failed to write {}", scaled_object_retry_path))?;
+        
+        println!("  ✅ {}", worker_path);
+        println!("  ✅ {}", scaled_object_path);
+        println!("  ✅ {}", scaled_object_retry_path);
+        
+        generated_files.push(worker_path);
+        generated_files.push(scaled_object_path);
+        generated_files.push(scaled_object_retry_path);
+    }
+    
+    println!("\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+    println!("✅ Successfully rendered {} manifest files!", generated_files.len());
+    println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n");
+    
+    println!("📋 Next steps:");
+    println!("  1. Install KEDA (if not already):");
+    println!("     kubectl apply --server-side -f k8s/keda/keda-install.yaml");
+    println!();
+    println!("  2. Create namespace:");
+    println!("     kubectl apply -f k8s/namespace.yaml");
+    println!();
+    println!("  3. Deploy Redis:");
+    println!("     kubectl apply -f k8s/redis.yaml");
+    println!();
+    println!("  4. Deploy API:");
+    println!("     kubectl apply -f k8s/api-deployment.yaml");
+    println!();
+    println!("  5. Deploy workers:");
+    println!("     kubectl apply -f k8s/workers/");
+    println!();
+    println!("  6. Deploy KEDA scalers:");
+    println!("     kubectl apply -f k8s/keda/scaled-object-*.yaml");
+    println!();
+    println!("  7. Verify deployment:");
+    println!("     kubectl get pods -n optimus");
+    println!("     kubectl get scaledobjects -n optimus");
+    
+    Ok(())
+}
+

@@ -10,15 +10,15 @@ metadata:
 spec:
   scaleTargetRef:
     name: optimus-worker-{{language}}  # Target language-specific deployment
-  minReplicaCount: 0  # Scale to zero when idle
-  maxReplicaCount: 50  # Higher ceiling for production scale
-  pollingInterval: 10  # Poll every 10 seconds
-  cooldownPeriod: 60  # Wait 60s before scaling down
+  minReplicaCount: 10  # Keep 1 worker warm (Docker Desktop limitation)
+  maxReplicaCount: 50  # Limit to 10 for Docker Desktop resources
+  pollingInterval: 1  # Poll every 3 seconds for quick response
+  cooldownPeriod: 30  # Wait 30s before scaling down
   triggers:
   - type: redis
     metadata:
       # Redis connection
-      address: redis:6379
+      address: redis.optimus.svc.cluster.local:6379
       # Queue name for {{language}} jobs (main queue only)
       listName: {{queue_name}}
       # Scale up when queue has 1 or more items

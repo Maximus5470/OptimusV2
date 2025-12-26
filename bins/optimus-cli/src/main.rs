@@ -76,6 +76,9 @@ enum Commands {
         #[arg(long, default_value = "false")]
         no_cache: bool,
     },
+
+    /// Render Kubernetes manifests from templates
+    RenderK8s,
 }
 
 #[tokio::main]
@@ -114,6 +117,9 @@ async fn main() -> Result<()> {
         }
         Commands::BuildImage { name, no_cache } => {
             commands::build_docker_image(&name, no_cache).await?;
+        }
+        Commands::RenderK8s => {
+            commands::render_k8s_manifests().await?;
         }
     }
 
