@@ -12,7 +12,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from collections import defaultdict
 import sys
 
-API_URL = "http://localhost:80"
+API_URL = "http://127.0.0.1:80"
 TOTAL_REQUESTS = 500
 
 # Job templates

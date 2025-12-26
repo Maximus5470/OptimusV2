@@ -280,7 +280,9 @@ write_success "Worker deployments created (scaled to 0, waiting for jobs)"
 
 # Step 11: Deploy KEDA scalers
 write_step "Deploying KEDA ScaledObjects..."
-kubectl apply -f k8s/keda/scaled-object-*.yaml
+for f in k8s/keda/scaled-object-*.yaml; do
+    kubectl apply -f "$f"
+done
 write_success "KEDA scalers deployed"
 
 # Step 12: Verify deployment

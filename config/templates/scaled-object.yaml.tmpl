@@ -10,18 +10,20 @@ metadata:
 spec:
   scaleTargetRef:
     name: optimus-worker-{{language}}  # Target language-specific deployment
-  minReplicaCount: 10  # Keep 1 worker warm (Docker Desktop limitation)
-  maxReplicaCount: 50  # Limit to 10 for Docker Desktop resources
-  pollingInterval: 1  # Poll every 3 seconds for quick response
+  minReplicaCount: 10  # Keep workers warm
+  maxReplicaCount: 50  # Resource limit
+  pollingInterval: 1  # Poll every second for quick response
   cooldownPeriod: 30  # Wait 30s before scaling down
   triggers:
+  # Main queue trigger
   - type: redis
     metadata:
-      # Redis connection
       address: redis.optimus.svc.cluster.local:6379
-      # Queue name for {{language}} jobs (main queue only)
       listName: {{queue_name}}
-      # Scale up when queue has 1 or more items
       listLength: "1"
-      # Use password if Redis is secured (optional)
-      # passwordFromEnv: REDIS_PASSWORD
+  # Retry queue trigger
+  - type: redis
+    metadata:
+      address: redis.optimus.svc.cluster.local:6379
+      listName: {{queue_name}}:retry
+      listLength: "1"

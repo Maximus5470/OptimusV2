@@ -708,13 +708,10 @@ pub async fn render_k8s_manifests() -> Result<()> {
         .context("Failed to read worker-deployment.yaml.tmpl")?;
     let scaled_object_template = fs::read_to_string("config/templates/scaled-object.yaml.tmpl")
         .context("Failed to read scaled-object.yaml.tmpl")?;
-    let scaled_object_retry_template = fs::read_to_string("config/templates/scaled-object-retry.yaml.tmpl")
-        .context("Failed to read scaled-object-retry.yaml.tmpl")?;
     
     // Register templates
     handlebars.register_template_string("worker", &worker_template)?;
     handlebars.register_template_string("scaled_object", &scaled_object_template)?;
-    handlebars.register_template_string("scaled_object_retry", &scaled_object_retry_template)?;
     
     // Ensure output directories exist
     fs::create_dir_all("k8s/workers")
@@ -755,20 +752,11 @@ pub async fn render_k8s_manifests() -> Result<()> {
         fs::write(&scaled_object_path, scaled_object_yaml)
             .context(format!("Failed to write {}", scaled_object_path))?;
         
-        // Render retry queue ScaledObject
-        let scaled_object_retry_yaml = handlebars.render("scaled_object_retry", &data)
-            .context(format!("Failed to render retry ScaledObject for {}", lang.name))?;
-        let scaled_object_retry_path = format!("k8s/keda/scaled-object-{}-retry.yaml", lang.name);
-        fs::write(&scaled_object_retry_path, scaled_object_retry_yaml)
-            .context(format!("Failed to write {}", scaled_object_retry_path))?;
-        
         println!("  ✅ {}", worker_path);
         println!("  ✅ {}", scaled_object_path);
-        println!("  ✅ {}", scaled_object_retry_path);
         
         generated_files.push(worker_path);
         generated_files.push(scaled_object_path);
-        generated_files.push(scaled_object_retry_path);
     }
     
     println!("\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
