@@ -167,6 +167,31 @@ if [ "$SKIP_IMAGES" = false ]; then
         kind load docker-image optimus-api:latest
         kind load docker-image optimus-worker:latest
         write_success "Images loaded into kind cluster"
+    # For k3s clusters, import images into containerd
+    elif [[ "$CONTEXT" == *"k3s"* ]] || [[ "$CURRENT_CONTEXT" == *"k3s"* ]]; then
+        write_info "Detected k3s cluster - importing images into containerd..."
+        write_info "This requires sudo access for k3s ctr..."
+        
+        # Save images to tar
+        write_info "Saving optimus-api image..."
+        docker save optimus-api:latest -o /tmp/optimus-api.tar
+        
+        write_info "Saving optimus-worker image..."
+        docker save optimus-worker:latest -o /tmp/optimus-worker.tar
+        
+        # Import into k3s containerd
+        write_info "Importing optimus-api into k3s..."
+        sudo k3s ctr images import /tmp/optimus-api.tar
+        
+        write_info "Importing optimus-worker into k3s..."
+        sudo k3s ctr images import /tmp/optimus-worker.tar
+        
+        # Cleanup tar files
+        rm -f /tmp/optimus-api.tar /tmp/optimus-worker.tar
+        
+        write_success "Images imported into k3s containerd"
+        write_info "Verifying images in k3s..."
+        sudo k3s ctr images ls | grep optimus || write_warning "Could not verify images"
     fi
 fi
 
