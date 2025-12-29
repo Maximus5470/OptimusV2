@@ -75,6 +75,8 @@ pub async fn submit_job(
     Json(payload): Json<SubmitRequest>,
 ) -> impl IntoResponse {
     // Extract idempotency key if provided
+    // PERFORMANCE NOTE: Idempotency checks clone ConnectionManager
+    // Under extreme load (500+ concurrent requests), this may cause contention
     let idempotency_key = headers
         .get("idempotency-key")
         .and_then(|v| v.to_str().ok())

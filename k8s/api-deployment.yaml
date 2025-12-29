@@ -48,6 +48,8 @@ spec:
           value: "8080"
         - name: LANGUAGE_CONFIG_PATH
           value: "config/languages.json"
+        - name: USE_COMPILE_ONCE
+          value: "true"
         resources:
           requests:
             memory: "256Mi"

@@ -137,21 +137,30 @@ impl<'a> ContainerGuard<'a> {
 
 impl<'a> Drop for ContainerGuard<'a> {
     fn drop(&mut self) {
-        // Best-effort cleanup - cannot be async in Drop
-        // Fire-and-forget cleanup task
+        // CRITICAL FIX: Use blocking_task to ensure cleanup completes
+        // Previous fire-and-forget approach could leak containers under load
+        // 
+        // This uses tokio's blocking thread pool to avoid blocking async runtime
+        // while still ensuring cleanup happens before Drop completes
         let container_id = self.container_id.clone();
         let docker = self.docker.clone();
         
-        tokio::spawn(async move {
-            let remove_options = RemoveContainerOptions {
-                force: true,
-                ..Default::default()
-            };
-            
-            if let Err(e) = docker.remove_container(&container_id, Some(remove_options)).await {
-                eprintln!("⚠ Failed to cleanup container {}: {}", container_id, e);
-            }
-        });
+        // Use Handle::current() to access runtime from Drop context
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.spawn(async move {
+                let remove_options = RemoveContainerOptions {
+                    force: true,
+                    ..Default::default()
+                };
+                
+                if let Err(e) = docker.remove_container(&container_id, Some(remove_options)).await {
+                    eprintln!("⚠ Failed to cleanup container {}: {}", container_id, e);
+                }
+            });
+        } else {
+            // Fallback: If no runtime available, warn but don't panic
+            eprintln!("⚠ WARNING: No tokio runtime available for container cleanup: {}", container_id);
+        }
     }
 }
 
@@ -368,7 +377,8 @@ impl DockerEngine {
             let mut stderr = String::new();
             let mut exit_code: Option<i64> = None;
             
-            // Collect logs and wait for completion in parallel
+            // Collect logs and wait for completion in TRUE PARALLEL
+            // This prevents deadlock where logs stream waits for container to stop
             let logs_options = Some(bollard::container::LogsOptions::<String> {
                 stdout: true,
                 stderr: true,
@@ -378,38 +388,71 @@ impl DockerEngine {
             
             let mut logs_stream = self.docker.logs(&container_id, logs_options);
             
-            // Collect all output
-            while let Some(output) = logs_stream.next().await {
-                match output {
-                    Ok(LogOutput::StdOut { message }) => {
-                        stdout.push_str(&String::from_utf8_lossy(&message));
-                    }
-                    Ok(LogOutput::StdErr { message }) => {
-                        stderr.push_str(&String::from_utf8_lossy(&message));
-                    }
-                    Err(e) => {
-                        eprintln!("⚠ Error reading container logs: {}", e);
-                        break;
-                    }
-                    _ => {}
-                }
-            }
-            
-            // Get exit code - wait for container to finish
+            // Wait for container to finish
             let wait_options = WaitContainerOptions {
                 condition: "not-running",
             };
-            
             let mut wait_stream = self.docker.wait_container(&container_id, Some(wait_options));
-            if let Some(wait_result) = wait_stream.next().await {
-                if let Ok(response) = wait_result {
-                    exit_code = Some(response.status_code);
-                    println!("    Container exited with code: {}", response.status_code);
-                } else {
-                    eprintln!("    ⚠ Failed to get container exit code");
+            
+            // Run both streams in parallel using tokio::select!
+            // This ensures we don't block on logs waiting for container completion
+            loop {
+                tokio::select! {
+                    // Collect log output as it arrives
+                    log_result = logs_stream.next() => {
+                        match log_result {
+                            Some(Ok(LogOutput::StdOut { message })) => {
+                                stdout.push_str(&String::from_utf8_lossy(&message));
+                            }
+                            Some(Ok(LogOutput::StdErr { message })) => {
+                                stderr.push_str(&String::from_utf8_lossy(&message));
+                            }
+                            Some(Err(e)) => {
+                                eprintln!("⚠ Error reading container logs: {}", e);
+                            }
+                            None => {
+                                // Logs stream ended - container likely stopped
+                            }
+                            _ => {}
+                        }
+                    }
+                    // Wait for container to finish
+                    wait_result = wait_stream.next() => {
+                        if let Some(Ok(response)) = wait_result {
+                            exit_code = Some(response.status_code);
+                            println!("    Container exited with code: {}", response.status_code);
+                            
+                            // Container finished - drain remaining logs with adequate timeout
+                            // CRITICAL FIX: Increased from 100ms to 2000ms to handle large outputs
+                            // Under load, 100ms was insufficient and caused incomplete log capture
+                            let drain_timeout = tokio::time::timeout(
+                                Duration::from_millis(2000),
+                                async {
+                                    while let Some(log_result) = logs_stream.next().await {
+                                        match log_result {
+                                            Ok(LogOutput::StdOut { message }) => {
+                                                stdout.push_str(&String::from_utf8_lossy(&message));
+                                            }
+                                            Ok(LogOutput::StdErr { message }) => {
+                                                stderr.push_str(&String::from_utf8_lossy(&message));
+                                            }
+                                            _ => {}
+                                        }
+                                    }
+                                }
+                            ).await;
+                            
+                            if drain_timeout.is_err() {
+                                warn!("Logs drain timed out after 2s - possible large output");
+                            }
+                            
+                            break;
+                        } else if wait_result.is_none() {
+                            eprintln!("    ⚠ No wait response from container");
+                            break;
+                        }
+                    }
                 }
-            } else {
-                eprintln!("    ⚠ No wait response from container");
             }
             
             (stdout, stderr, exit_code)

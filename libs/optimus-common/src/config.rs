@@ -14,7 +14,9 @@ pub struct Config {
 #[derive(Debug, Clone)]
 pub struct WorkerConfig {
     /// Maximum jobs executing in parallel on this worker
-    /// Default: 1 (safe baseline - predictable resource usage)
+    /// Default: 3 (balanced throughput - adjust based on resources)
+    /// PERFORMANCE: Increased from 1 to 3 for better queue processing
+    /// Set MAX_PARALLEL_JOBS env var to tune per deployment
     pub max_parallel_jobs: usize,
     
     /// Maximum test cases executing in parallel within a single job
@@ -52,11 +54,13 @@ impl Default for Config {
 impl WorkerConfig {
     pub fn from_env() -> Self {
         Self {
-            max_parallel_jobs: env::var("MAX_PARALLEL_JOBS")
+            max_parallel_jobs: env::var("OPTIMUS_MAX_PARALLEL_JOBS")
+                .or_else(|_| env::var("MAX_PARALLEL_JOBS"))
                 .ok()
                 .and_then(|v| v.parse().ok())
-                .unwrap_or(1),
-            max_parallel_tests: env::var("MAX_PARALLEL_TESTS")
+                .unwrap_or(3),  // PERFORMANCE FIX: Changed from 1 to 3
+            max_parallel_tests: env::var("OPTIMUS_MAX_PARALLEL_TESTS")
+                .or_else(|_| env::var("MAX_PARALLEL_TESTS"))
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(1),
@@ -88,7 +92,7 @@ mod tests {
     #[test]
     fn test_worker_config_defaults() {
         let config = WorkerConfig::default();
-        assert_eq!(config.max_parallel_jobs, 1);
+        assert_eq!(config.max_parallel_jobs, 3);  // Updated from 1 to 3
         assert_eq!(config.max_parallel_tests, 1);
     }
 }

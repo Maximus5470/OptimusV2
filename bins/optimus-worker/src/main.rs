@@ -30,23 +30,23 @@ use serde::Serialize;
 #[derive(Clone)]
 struct WorkerState {
     redis_url: String,
-    is_executing: Arc<RwLock<bool>>,
+    active_jobs: Arc<RwLock<usize>>,
 }
 
 #[derive(Serialize)]
 struct HealthResponse {
     status: String,
-    executing_job: bool,
+    active_jobs: usize,
 }
 
 /// Liveness probe - simple process alive check
 async fn health_handler(State(state): State<WorkerState>) -> impl IntoResponse {
-    let executing = *state.is_executing.read().await;
+    let active = *state.active_jobs.read().await;
     (
         StatusCode::OK,
         Json(HealthResponse {
             status: "healthy".to_string(),
-            executing_job: executing,
+            active_jobs: active,
         })
     )
 }
@@ -69,11 +69,12 @@ async fn ready_handler(State(state): State<WorkerState>) -> impl IntoResponse {
         Err(_) => false,
     };
 
-    let executing = *state.is_executing.read().await;
+    let active = *state.active_jobs.read().await;
     
-    // Worker is ready if Redis is reachable AND not currently executing
-    // This allows KEDA to scale down idle workers safely
-    let is_ready = redis_ok && !executing;
+    // Worker is ready if Redis is reachable (regardless of busy state)
+    // Being busy with jobs doesn't mean the worker is "not ready"
+    // KEDA will scale based on queue depth, not worker readiness
+    let is_ready = redis_ok;
     
     let status_code = if is_ready {
         StatusCode::OK
@@ -85,7 +86,7 @@ async fn ready_handler(State(state): State<WorkerState>) -> impl IntoResponse {
         status_code,
         Json(HealthResponse {
             status: if is_ready { "ready".to_string() } else { "not_ready".to_string() },
-            executing_job: executing,
+            active_jobs: active,
         })
     )
 }
@@ -280,10 +281,10 @@ async fn main() -> anyhow::Result<()> {
     info!("Concurrency semaphore initialized with {} permits", worker_config.max_parallel_jobs);
 
     // Create shared state for health checks
-    let is_executing = Arc::new(RwLock::new(false));
+    let active_jobs = Arc::new(RwLock::new(0usize));
     let health_state = WorkerState {
         redis_url: redis_url.clone(),
-        is_executing: is_executing.clone(),
+        active_jobs: active_jobs.clone(),
     };
 
     // Start health check server in background
@@ -321,7 +322,7 @@ async fn main() -> anyhow::Result<()> {
     };
 
     tokio::select! {
-        _ = worker_loop(&mut redis_conn, &language, &config_manager, semaphore, is_executing) => {},
+        _ = worker_loop(&mut redis_conn, &language, &config_manager, semaphore, active_jobs) => {},
         _ = shutdown => {},
     }
 
@@ -329,23 +330,30 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-#[instrument(skip(redis_conn, config_manager, semaphore, is_executing), fields(language = %language))]
+#[instrument(skip(redis_conn, config_manager, semaphore, active_jobs), fields(language = %language))]
 async fn worker_loop(
     redis_conn: &mut ::redis::aio::ConnectionManager,
     language: &Language,
     config_manager: &LanguageConfigManager,
     semaphore: Arc<Semaphore>,
-    is_executing: Arc<RwLock<bool>>,
+    active_jobs: Arc<RwLock<usize>>,
 ) -> anyhow::Result<()> {
+    // Clone connection for concurrent task spawning
+    let redis_client = ::redis::Client::open(
+        std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".to_string()).as_str()
+    )?;
+    
     loop {
         // Log idle state (waiting for jobs)
         debug!("Worker IDLE - waiting for job from queue");
         
-        // BLPOP with 5 second timeout for graceful shutdown
+        // BLPOP with 30 second timeout for graceful shutdown
+        // PERFORMANCE FIX: Increased from 5s to 30s to reduce unnecessary wake-ups
+        // and Redis roundtrips under load. Still responsive enough for shutdown.
         // Consumes from both main queue and retry queue (main has priority)
-        match redis::pop_job_with_retry(redis_conn, language, 5.0).await {
+        match redis::pop_job_with_retry(redis_conn, language, 30.0).await {
             Ok(Some(mut job)) => {
-                let job_id = job.id;
+                let job_id = job.id.clone();
                 
                 // ===== CRITICAL: Language Mismatch Check =====
                 // Workers MUST only process jobs for their configured language
@@ -398,7 +406,7 @@ async fn worker_loop(
                     source_size = job.source_code.len(),
                     phase = "dequeued",
                     available_permits = semaphore.available_permits(),
-                    "Worker BUSY - processing job"
+                    "Job dequeued - spawning concurrent execution"
                 );
                 
                 // Display language-specific configuration
@@ -412,186 +420,218 @@ async fn worker_loop(
                     );
                 }
                 
-                // Check for cancellation before starting execution
-                match redis::is_job_cancelled(redis_conn, &job_id).await {
-                    Ok(true) => {
-                        warn!(
-                            job_id = %job_id,
-                            phase = "cancelled_before_execution",
-                            "Job was cancelled before execution started"
-                        );
-                        
-                        // Store cancelled result
-                        let cancelled_result = optimus_common::types::ExecutionResult {
-                            job_id: job.id,
-                            overall_status: optimus_common::types::JobStatus::Cancelled,
-                            score: 0,
-                            max_score: job.test_cases.iter().map(|tc| tc.weight).sum(),
-                            results: vec![],
-                        };
-                        
-                        if let Err(store_err) = redis::store_result_with_metrics(redis_conn, &cancelled_result, &job.language).await {
-                            error!(
-                                job_id = %job_id,
-                                error = %store_err,
-                                "Failed to store cancelled result"
-                            );
-                        } else {
-                            info!(job_id = %job_id, "Cancelled result stored");
+                // SPAWN CONCURRENT TASK for job execution
+                // This allows the main loop to immediately fetch the next job
+                // while this job executes in parallel (up to max_parallel_jobs)
+                let config_manager_clone = config_manager.clone();
+                let active_jobs_clone = active_jobs.clone();
+                let redis_client_clone = redis_client.clone();
+                
+                tokio::spawn(async move {
+                    // Increment active job count
+                    {
+                        let mut count = active_jobs_clone.write().await;
+                        *count += 1;
+                        info!(job_id = %job_id, active_jobs = *count, "Job started");
+                    }
+                    // Get fresh Redis connection for this task
+                    let mut task_redis_conn = match ::redis::aio::ConnectionManager::new(redis_client_clone).await {
+                        Ok(conn) => conn,
+                        Err(e) => {
+                            error!(job_id = %job_id, error = %e, "Failed to create Redis connection for task");
+                            drop(permit);
+                            return;
                         }
-                        
-                        // MARK: Worker as idle (job was cancelled)
-                        *is_executing.write().await = false;
-                        drop(permit);
-                        
-                        continue;
-                    }
-                    Ok(false) => {
-                        // Not cancelled, proceed with execution
-                    }
-                    Err(e) => {
-                        error!(
-                            job_id = %job_id,
-                            error = %e,
-                            "Failed to check cancellation status, proceeding with execution"
-                        );
-                    }
-                }
-                
-                // MARK: Worker as executing (for readiness probe)
-                *is_executing.write().await = true;
-                
-                // Execute job with Docker executor
-                info!(
-                    job_id = %job_id, 
-                    phase = "executing",
-                    attempt = job.metadata.attempts + 1,
-                    max_attempts = job.metadata.max_attempts,
-                    "Starting execution"
-                );
-                let start = std::time::Instant::now();
-                let result = match executor::execute_docker(&job, config_manager, redis_conn).await {
-                    Ok(result) => result,
-                    Err(e) => {
-                        error!(
-                            job_id = %job_id, 
-                            phase = "execution_failed", 
-                            error = %e,
-                            attempts = job.metadata.attempts,
-                            "Docker execution failed"
-                        );
-                        
-                        // Increment attempts
-                        job.metadata.attempts += 1;
-                        job.metadata.last_failure_reason = Some(format!("Execution error: {}", e));
-                        
-                        // Retry logic
-                        if job.metadata.attempts < job.metadata.max_attempts {
+                    };
+                    
+                    // Check for cancellation before starting execution
+                    match redis::is_job_cancelled(&mut task_redis_conn, &job_id).await {
+                        Ok(true) => {
                             warn!(
                                 job_id = %job_id,
-                                attempt = job.metadata.attempts,
-                                max_attempts = job.metadata.max_attempts,
-                                "Job failed, sending to retry queue"
+                                phase = "cancelled_before_execution",
+                                "Job was cancelled before execution started"
                             );
                             
-                            if let Err(retry_err) = redis::push_to_retry_queue(redis_conn, &job).await {
-                                error!(
-                                    job_id = %job_id,
-                                    error = %retry_err,
-                                    "Failed to push job to retry queue"
-                                );
-                            } else {
-                                info!(job_id = %job_id, "Job pushed to retry queue");
-                            }
-                        } else {
-                            error!(
-                                job_id = %job_id,
-                                attempts = job.metadata.attempts,
-                                "Job exceeded max attempts, sending to DLQ"
-                            );
-                            
-                            if let Err(dlq_err) = redis::push_to_dlq(redis_conn, &job).await {
-                                error!(
-                                    job_id = %job_id,
-                                    error = %dlq_err,
-                                    "Failed to push job to DLQ"
-                                );
-                            } else {
-                                info!(job_id = %job_id, "Job pushed to DLQ");
-                            }
-                            
-                            // Store final failed result
-                            let failed_result = optimus_common::types::ExecutionResult {
+                            // Store cancelled result
+                            let cancelled_result = optimus_common::types::ExecutionResult {
                                 job_id: job.id,
-                                overall_status: optimus_common::types::JobStatus::Failed,
+                                overall_status: optimus_common::types::JobStatus::Cancelled,
                                 score: 0,
                                 max_score: job.test_cases.iter().map(|tc| tc.weight).sum(),
                                 results: vec![],
                             };
                             
-                            if let Err(store_err) = redis::store_result_with_metrics(redis_conn, &failed_result, &job.language).await {
+                            if let Err(store_err) = redis::store_result_with_metrics(&mut task_redis_conn, &cancelled_result, &job.language).await {
                                 error!(
                                     job_id = %job_id,
                                     error = %store_err,
-                                    "Failed to store failed result"
+                                    "Failed to store cancelled result"
                                 );
+                            } else {
+                                info!(job_id = %job_id, "Cancelled result stored");
                             }
+                            
+                            // Decrement active job count
+                            {
+                                let mut count = active_jobs_clone.write().await;
+                                *count = count.saturating_sub(1);
+                            }
+                            
+                            drop(permit);
+                            return;
                         }
-                        
-                        // MARK: Worker as idle (execution failed)
-                        *is_executing.write().await = false;
-                        drop(permit);
-                        
-                        continue;
+                        Ok(false) => {
+                            // Not cancelled, proceed with execution
+                        }
+                        Err(e) => {
+                            error!(
+                                job_id = %job_id,
+                                error = %e,
+                                "Failed to check cancellation status, proceeding with execution"
+                            );
+                        }
                     }
-                };
-                let execution_time = start.elapsed();
-                
-                info!(
-                    job_id = %job_id,
-                    phase = "evaluated",
-                    status = ?result.overall_status,
-                    score = result.score,
-                    max_score = result.max_score,
-                    execution_ms = execution_time.as_millis(),
-                    "Execution completed"
-                );
-                
-                for (idx, test_result) in result.results.iter().enumerate() {
-                    debug!(
-                        job_id = %job_id,
-                        test_num = idx + 1,
-                        test_id = test_result.test_id,
-                        status = ?test_result.status,
-                        execution_ms = test_result.execution_time_ms,
-                        "Test result"
+                    
+                    // Execute job with Docker executor
+                    info!(
+                        job_id = %job_id, 
+                        phase = "executing",
+                        attempt = job.metadata.attempts + 1,
+                        max_attempts = job.metadata.max_attempts,
+                        "Starting execution"
                     );
-                }
-                
-                // Persist result to Redis with metrics
-                info!(job_id = %job_id, phase = "persisting", "Storing result to Redis");
-                match redis::store_result_with_metrics(redis_conn, &result, &job.language).await {
-                    Ok(_) => {
-                        info!(job_id = %job_id, phase = "completed", "Result persisted to Redis");
+                    let start = std::time::Instant::now();
+                    let result = match executor::execute_docker(&job, &config_manager_clone, &mut task_redis_conn).await {
+                        Ok(result) => result,
+                        Err(e) => {
+                            error!(
+                                job_id = %job_id, 
+                                phase = "execution_failed", 
+                                error = %e,
+                                attempts = job.metadata.attempts,
+                                "Docker execution failed"
+                            );
+                            
+                            // Increment attempts
+                            let mut job_mut = job;
+                            job_mut.metadata.attempts += 1;
+                            job_mut.metadata.last_failure_reason = Some(format!("Execution error: {}", e));
+                            
+                            // Retry logic
+                            if job_mut.metadata.attempts < job_mut.metadata.max_attempts {
+                                warn!(
+                                    job_id = %job_id,
+                                    attempt = job_mut.metadata.attempts,
+                                    max_attempts = job_mut.metadata.max_attempts,
+                                    "Job failed, sending to retry queue"
+                                );
+                                
+                                if let Err(retry_err) = redis::push_to_retry_queue(&mut task_redis_conn, &job_mut).await {
+                                    error!(
+                                        job_id = %job_id,
+                                        error = %retry_err,
+                                        "Failed to push job to retry queue"
+                                    );
+                                } else {
+                                    info!(job_id = %job_id, "Job pushed to retry queue");
+                                }
+                            } else {
+                                error!(
+                                    job_id = %job_id,
+                                    attempts = job_mut.metadata.attempts,
+                                    "Job exceeded max attempts, sending to DLQ"
+                                );
+                                
+                                if let Err(dlq_err) = redis::push_to_dlq(&mut task_redis_conn, &job_mut).await {
+                                    error!(
+                                        job_id = %job_id,
+                                        error = %dlq_err,
+                                        "Failed to push job to DLQ"
+                                    );
+                                } else {
+                                    info!(job_id = %job_id, "Job pushed to DLQ");
+                                }
+                                
+                                // Store final failed result
+                                let failed_result = optimus_common::types::ExecutionResult {
+                                    job_id: job_mut.id,
+                                    overall_status: optimus_common::types::JobStatus::Failed,
+                                    score: 0,
+                                    max_score: job_mut.test_cases.iter().map(|tc| tc.weight).sum(),
+                                    results: vec![],
+                                };
+                                
+                                if let Err(store_err) = redis::store_result_with_metrics(&mut task_redis_conn, &failed_result, &job_mut.language).await {
+                                    error!(
+                                        job_id = %job_id,
+                                        error = %store_err,
+                                        "Failed to store failed result"
+                                    );
+                                }
+                            }
+                            
+                            // Decrement active job count
+                            {
+                                let mut count = active_jobs_clone.write().await;
+                                *count = count.saturating_sub(1);
+                            }
+                            
+                            drop(permit);
+                            return;
+                        }
+                    };
+                    let execution_time = start.elapsed();
+                    
+                    info!(
+                        job_id = %job_id,
+                        phase = "evaluated",
+                        status = ?result.overall_status,
+                        score = result.score,
+                        max_score = result.max_score,
+                        execution_ms = execution_time.as_millis(),
+                        "Execution completed"
+                    );
+                    
+                    for (idx, test_result) in result.results.iter().enumerate() {
+                        debug!(
+                            job_id = %job_id,
+                            test_num = idx + 1,
+                            test_id = test_result.test_id,
+                            status = ?test_result.status,
+                            execution_ms = test_result.execution_time_ms,
+                            "Test result"
+                        );
                     }
-                    Err(e) => {
-                        error!(job_id = %job_id, phase = "persist_failed", error = %e, "Failed to persist result");
-                        // Non-fatal - worker continues
+                    
+                    // Persist result to Redis with metrics
+                    info!(job_id = %job_id, phase = "persisting", "Storing result to Redis");
+                    match redis::store_result_with_metrics(&mut task_redis_conn, &result, &job.language).await {
+                        Ok(_) => {
+                            info!(job_id = %job_id, phase = "completed", "Result persisted to Redis");
+                        }
+                        Err(e) => {
+                            error!(job_id = %job_id, phase = "persist_failed", error = %e, "Failed to persist result");
+                            // Non-fatal - task continues
+                        }
                     }
-                }
-                
-                info!(
-                    job_id = %job_id, 
-                    phase = "done", 
-                    available_permits = semaphore.available_permits() + 1,
-                    "Worker IDLE - job completed, permit released"
-                );
-                
-                // MARK: Worker as idle (for readiness probe)
-                *is_executing.write().await = false;
-                
-                // Permit is automatically released when dropped here
-                drop(permit);
+                    
+                    info!(
+                        job_id = %job_id, 
+                        phase = "done", 
+                        "Job completed, permit released"
+                    );
+                    
+                    // Decrement active job count
+                    {
+                        let mut count = active_jobs_clone.write().await;
+                        *count = count.saturating_sub(1);
+                        info!(job_id = %job_id, active_jobs = *count, "Job finished");
+                    }
+                    
+                    // Permit is automatically released when dropped here
+                    drop(permit);
+                });
             }
             Ok(None) => {
                 // Timeout - check for shutdown (idle continues)
