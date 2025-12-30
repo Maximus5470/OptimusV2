@@ -35,9 +35,9 @@ pub async fn execute_docker(
 ) -> Result<ExecutionResult> {
     println!("→ Starting job execution: {}", job.id);
     
-    // Check feature flag for compile-once execution
+    // Check feature flag for compile-once execution (default: true)
     let use_compile_once = std::env::var("USE_COMPILE_ONCE")
-        .unwrap_or_else(|_| "false".to_string())
+        .unwrap_or_else(|_| "true".to_string())
         .to_lowercase() == "true";
     
     let execution_mode = if use_compile_once { "compile_once" } else { "legacy" };

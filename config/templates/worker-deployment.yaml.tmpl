@@ -64,6 +64,10 @@ spec:
         - name: OPTIMUS_MAX_PARALLEL_TESTS
           value: "{{max_parallel_tests}}"
         
+        # ===== EXECUTION MODE =====
+        - name: USE_COMPILE_ONCE
+          value: "true"
+        
         volumeMounts:
         - name: docker-sock
           mountPath: /var/run/docker.sock

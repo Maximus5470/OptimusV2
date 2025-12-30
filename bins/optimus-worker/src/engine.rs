@@ -647,6 +647,7 @@ impl DockerEngine {
     /// 
     /// ## Returns
     /// TestExecutionOutput with execution results
+    #[allow(dead_code)]
     #[tracing::instrument(skip(self, input), fields(language = %language, timeout_ms = timeout_ms))]
     pub async fn execute_test_in_container(
         &self,
@@ -799,6 +800,136 @@ impl DockerEngine {
         })
     }
 
+    /// Static helper to execute a test in a running container (for parallel execution)
+    /// This is a static method that can be called from async closures
+    async fn execute_test_in_running_container(
+        docker: &Docker,
+        container_id: &str,
+        language: &Language,
+        input: &str,
+        timeout_ms: u64,
+    ) -> Result<TestExecutionOutput> {
+        use bollard::exec::{CreateExecOptions, StartExecOptions};
+        
+        // Validate input size
+        if input.len() > MAX_TEST_INPUT_BYTES {
+            bail!("Test input exceeds maximum size of {} bytes", MAX_TEST_INPUT_BYTES);
+        }
+        
+        let start_time = Instant::now();
+        
+        // Encode input for the runner script
+        let encoded_input = general_purpose::STANDARD.encode(input);
+        
+        // Determine execution command based on language
+        let java_cmd = format!("(unset JAVA_TOOL_OPTIONS; echo '{}' | base64 -d | java -cp /code Main)", encoded_input);
+        let rust_cmd = format!("echo '{}' | base64 -d | /code/main", encoded_input);
+        let python_cmd = format!("echo '{}' | base64 -d | python3 -u /code/main.py", encoded_input);
+        
+        let exec_cmd = match language {
+            Language::Java => vec!["bash", "-c", &java_cmd],
+            Language::Rust => vec!["bash", "-c", &rust_cmd],
+            Language::Python => vec!["bash", "-c", &python_cmd],
+        };
+        
+        // Create exec instance for test execution
+        let exec_config = CreateExecOptions {
+            cmd: Some(exec_cmd.iter().map(|s| s.to_string()).collect()),
+            attach_stdin: Some(true),
+            attach_stdout: Some(true),
+            attach_stderr: Some(true),
+            ..Default::default()
+        };
+        
+        let exec = docker
+            .create_exec(container_id, exec_config)
+            .await
+            .context("Failed to create exec for test execution")?;
+        
+        // Start execution with timeout
+        let start_config = StartExecOptions {
+            detach: false,
+            ..Default::default()
+        };
+        
+        let timeout_duration = Duration::from_millis(timeout_ms);
+        let mut timed_out = false;
+        let mut runtime_error = false;
+        
+        let execution_future = async {
+            let output = docker.start_exec(&exec.id, Some(start_config)).await?;
+            
+            let mut stdout = String::new();
+            let mut stderr = String::new();
+            
+            // Collect execution output
+            if let bollard::exec::StartExecResults::Attached { mut output, .. } = output {
+                while let Some(msg) = output.next().await {
+                    match msg {
+                        Ok(log_output) => {
+                            match log_output {
+                                LogOutput::StdOut { message } => {
+                                    stdout.push_str(&String::from_utf8_lossy(&message));
+                                }
+                                LogOutput::StdErr { message } => {
+                                    stderr.push_str(&String::from_utf8_lossy(&message));
+                                }
+                                _ => {}
+                            }
+                        }
+                        Err(e) => {
+                            stderr.push_str(&format!("\n[Execution error: {}]", e));
+                            break;
+                        }
+                    }
+                }
+            }
+            
+            // Get exit code
+            let inspect = docker.inspect_exec(&exec.id).await?;
+            let exit_code = inspect.exit_code;
+            
+            Ok::<(String, String, Option<i64>), anyhow::Error>((stdout, stderr, exit_code))
+        };
+        
+        // Execute with timeout
+        let timeout_result = tokio::time::timeout(timeout_duration, execution_future).await;
+        
+        let (stdout, stderr, _exit_code) = match timeout_result {
+            Ok(Ok((out, err, code))) => {
+                // Check exit code for runtime errors
+                if let Some(code) = code {
+                    if code != 0 {
+                        runtime_error = true;
+                    }
+                }
+                (out, err, code)
+            }
+            Ok(Err(e)) => {
+                // Execution error
+                runtime_error = true;
+                (String::new(), format!("Execution failed: {}", e), None)
+            }
+            Err(_) => {
+                // Timeout
+                timed_out = true;
+                (String::new(), "[Execution timed out]".to_string(), None)
+            }
+        };
+        
+        let execution_time_ms = start_time.elapsed().as_millis() as u64;
+        
+        Ok(TestExecutionOutput {
+            test_id: 0, // Will be set by caller
+            stdout,
+            stderr,
+            execution_time_ms,
+            timed_out,
+            runtime_error,
+            compilation_failed: false,
+        })
+    }
+
     /// Execute a complete job in a single container (Phase 2: Compile-once execution)
     /// 
     /// This is the new execution path that:
@@ -937,65 +1068,102 @@ impl DockerEngine {
         }
 
         println!();
-        println!("→ Executing {} test cases against compiled artifact", job.test_cases.len());
+        println!("→ Executing {} test cases against compiled artifact (parallel mode)", job.test_cases.len());
         println!();
 
-        // Step 2: Execute all test cases
-        let mut outputs = Vec::new();
-
-        for (idx, test_case) in job.test_cases.iter().enumerate() {
-            // Check for cancellation between tests
-            match optimus_common::redis::is_job_cancelled(redis_conn, &job.id).await {
-                Ok(true) => {
-                    println!("  ⚠ Job cancelled - stopping at test {}/{}", idx + 1, job.test_cases.len());
-                    break;
-                }
-                Err(e) => {
-                    eprintln!("  ⚠ Failed to check cancellation: {}", e);
-                }
-                _ => {}
-            }
-
-            println!("  Executing test {} (id: {})", idx + 1, test_case.id);
-
-            let result = self.execute_test_in_container(
-                &container_id,
-                &job.language,
-                &test_case.input,
-                job.timeout_ms,
-            ).await;
-
-            let mut output = match result {
-                Ok(output) => output,
-                Err(e) => {
-                    eprintln!("    ✗ Test execution error: {}", e);
-                    TestExecutionOutput {
-                        test_id: test_case.id,
-                        stdout: String::new(),
-                        stderr: format!("Test execution error: {}", e),
-                        execution_time_ms: 0,
-                        timed_out: false,
-                        runtime_error: true,
-                        compilation_failed: false,
+        // Step 2: Execute all test cases in parallel
+        use futures_util::stream::{self, StreamExt};
+        use std::sync::Arc;
+        use tokio::sync::Mutex;
+        
+        let redis_conn = Arc::new(Mutex::new(redis_conn));
+        let container_id_arc = Arc::new(container_id.clone());
+        let job_id = Arc::new(job.id.clone());
+        let language_arc = Arc::new(job.language.clone());
+        let timeout_ms = job.timeout_ms;
+        let docker = Arc::new(self.docker.clone());
+        
+        // Clone test cases to owned vector for parallel processing
+        let test_cases: Vec<_> = job.test_cases.iter().cloned().enumerate().collect();
+        
+        // Execute tests in parallel with configurable concurrency
+        let max_parallel = std::env::var("OPTIMUS_MAX_PARALLEL_TESTS")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(4);
+        
+        println!("  Running up to {} tests in parallel", max_parallel);
+        
+        let outputs: Vec<_> = stream::iter(test_cases)
+            .map(|(idx, test_case)| {
+                let container_id_arc = Arc::clone(&container_id_arc);
+                let job_id = Arc::clone(&job_id);
+                let language_arc = Arc::clone(&language_arc);
+                let redis_conn = Arc::clone(&redis_conn);
+                let docker = Arc::clone(&docker);
+                
+                async move {
+                    // Check for cancellation
+                    let mut conn = redis_conn.lock().await;
+                    match optimus_common::redis::is_job_cancelled(&mut *conn, &job_id).await {
+                        Ok(true) => {
+                            println!("  ⚠ Job cancelled - skipping test {}", idx + 1);
+                            return None;
+                        }
+                        Err(e) => {
+                            eprintln!("  ⚠ Failed to check cancellation: {}", e);
+                        }
+                        _ => {}
                     }
+                    drop(conn); // Release lock before execution
+                    
+                    println!("  Executing test {} (id: {})", idx + 1, test_case.id);
+                    
+                    // Execute test directly using docker client
+                    let result = DockerEngine::execute_test_in_running_container(
+                        &docker,
+                        &container_id_arc,
+                        &language_arc,
+                        &test_case.input,
+                        timeout_ms,
+                    ).await;
+                    
+                    let mut output = match result {
+                        Ok(output) => output,
+                        Err(e) => {
+                            eprintln!("    ✗ Test execution error: {}", e);
+                            TestExecutionOutput {
+                                test_id: test_case.id,
+                                stdout: String::new(),
+                                stderr: format!("Test execution error: {}", e),
+                                execution_time_ms: 0,
+                                timed_out: false,
+                                runtime_error: true,
+                                compilation_failed: false,
+                            }
+                        }
+                    };
+                    
+                    output.test_id = test_case.id;
+                    
+                    println!("    Test {} completed: {}ms", idx + 1, output.execution_time_ms);
+                    if output.timed_out {
+                        println!("    ⚠ Timed out");
+                    }
+                    if output.runtime_error {
+                        println!("    ✗ Runtime error");
+                    }
+                    if !output.stderr.is_empty() && !output.runtime_error && !output.timed_out {
+                        println!("    stderr: {}", output.stderr.lines().next().unwrap_or(""));
+                    }
+                    
+                    Some(output)
                 }
-            };
-
-            output.test_id = test_case.id;
-
-            println!("    Execution time: {}ms", output.execution_time_ms);
-            if output.timed_out {
-                println!("    ⚠ Timed out");
-            }
-            if output.runtime_error {
-                println!("    ✗ Runtime error");
-            }
-            if !output.stderr.is_empty() && !output.runtime_error && !output.timed_out {
-                println!("    stderr: {}", output.stderr.lines().next().unwrap_or(""));
-            }
-
-            outputs.push(output);
-        }
+            })
+            .buffer_unordered(max_parallel)
+            .filter_map(|x| async { x })
+            .collect()
+            .await;
 
         println!();
         println!("→ All test cases executed (compile-once mode)");
@@ -1012,7 +1180,10 @@ impl DockerEngine {
             "Completed compile-once job execution"
         );
         
-        // Explicitly cleanup container before returning
+        // Explicitly cleanup container before returning (guard will also cleanup on drop as safety net)
+        // Drop the guard first to prevent double cleanup attempts
+        drop(_guard);
+        
         let remove_options = RemoveContainerOptions {
             force: true,
             ..Default::default()
@@ -1020,6 +1191,9 @@ impl DockerEngine {
         
         if let Err(e) = self.docker.remove_container(&container_id, Some(remove_options)).await {
             eprintln!("⚠ Failed to cleanup container {}: {}", container_id, e);
+            warn!(container_id = %container_id, error = %e, "Failed to cleanup container");
+        } else {
+            debug!(container_id = %container_id, "Container cleaned up successfully");
         }
         
         outputs
