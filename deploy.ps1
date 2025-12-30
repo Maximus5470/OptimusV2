@@ -49,7 +49,7 @@ if ($Uninstall) {
     kubectl delete -f k8s/namespace.yaml --ignore-not-found=true 2>$null
     
     Write-Host "Deleting KEDA..."
-    kubectl delete -f k8s/keda/keda-install.yaml --ignore-not-found=true 2>$null
+    kubectl delete -f https://github.com/kedacore/keda/releases/download/v2.16.1/keda-2.16.1.yaml --ignore-not-found=true 2>$null
     
     Write-Success "Uninstall complete!"
     exit 0
@@ -163,6 +163,11 @@ Write-Success "Manifests rendered"
 if (-not $SkipKeda) {
     Write-Step "Installing KEDA..."
     
+    $KEDA_VERSION = "2.16.1"
+    $KEDA_URL = "https://github.com/kedacore/keda/releases/download/v$KEDA_VERSION/keda-$KEDA_VERSION.yaml"
+    
+    Write-Info "Downloading KEDA v$KEDA_VERSION from GitHub..."
+    
     # Check if KEDA is already installed
     $ErrorActionPreference = 'SilentlyContinue'
     $kedaExists = kubectl get namespace keda 2>$null
@@ -175,12 +180,14 @@ if (-not $SkipKeda) {
             Write-Success "KEDA already installed and running"
         } else {
             Write-Info "KEDA namespace exists but pods not found, reinstalling..."
-            kubectl apply -f https://github.com/kedacore/keda/releases/download/v2.16.1/keda-2.16.1.yaml
+            Write-Info "Applying KEDA from: $KEDA_URL"
+            kubectl apply -f $KEDA_URL
             Start-Sleep -Seconds 5
         }
     } else {
         Write-Info "Installing KEDA for the first time..."
-        kubectl apply -f https://github.com/kedacore/keda/releases/download/v2.16.1/keda-2.16.1.yaml
+        Write-Info "Applying KEDA from: $KEDA_URL"
+        kubectl apply -f $KEDA_URL
         Start-Sleep -Seconds 10
     }
     

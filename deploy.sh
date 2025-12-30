@@ -204,6 +204,11 @@ write_success "Manifests rendered"
 if [ "$SKIP_KEDA" = false ]; then
     write_step "Installing KEDA..."
     
+    KEDA_VERSION="2.16.1"
+    KEDA_URL="https://github.com/kedacore/keda/releases/download/v${KEDA_VERSION}/keda-${KEDA_VERSION}.yaml"
+    
+    write_info "Downloading KEDA v${KEDA_VERSION} from GitHub..."
+    
     # Check if KEDA is already installed
     if kubectl get namespace keda &> /dev/null; then
         write_info "KEDA namespace already exists, checking pods..."
@@ -211,12 +216,14 @@ if [ "$SKIP_KEDA" = false ]; then
             write_success "KEDA already installed and running"
         else
             write_info "KEDA namespace exists but pods not found, reinstalling..."
-            kubectl apply -f https://github.com/kedacore/keda/releases/download/v2.16.1/keda-2.16.1.yaml
+            write_info "Applying KEDA from: $KEDA_URL"
+            kubectl apply -f $KEDA_URL
             sleep 5
         fi
     else
         write_info "Installing KEDA for the first time..."
-        kubectl apply -f https://github.com/kedacore/keda/releases/download/v2.16.1/keda-2.16.1.yaml
+        write_info "Applying KEDA from: $KEDA_URL"
+        kubectl apply -f $KEDA_URL
         sleep 10
     fi
     
