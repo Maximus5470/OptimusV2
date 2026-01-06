@@ -748,6 +748,9 @@ pub async fn render_k8s_manifests() -> Result<()> {
         // Render main queue ScaledObject
         let scaled_object_yaml = handlebars.render("scaled_object", &data)
             .context(format!("Failed to render ScaledObject for {}", lang.name))?;
+        // Safety check: ensure Prometheus-based ScaledObjects include a per-language filter
+        validate_prometheus_scaled_object(&scaled_object_yaml, &lang.name)?;
+
         let scaled_object_path = format!("k8s/keda/scaled-object-{}.yaml", lang.name);
         fs::write(&scaled_object_path, scaled_object_yaml)
             .context(format!("Failed to write {}", scaled_object_path))?;
@@ -788,4 +791,30 @@ pub async fn render_k8s_manifests() -> Result<()> {
     
     Ok(())
 }
+
+/// Validate that a rendered ScaledObject using Prometheus contains a per-language filter
+fn validate_prometheus_scaled_object(yaml: &str, language: &str) -> Result<()> {
+    if yaml.contains("type: prometheus") {
+        // Heuristic: the query must contain a `language=` snippet to scope metrics
+        if !yaml.contains("language=") {
+            bail!("Prometheus ScaledObject for '{}' does not include a per-language filter in the query. This can cause ALL language scalers to scale together. Add a language filter (e.g., 'query: optimus_queue_depth{{language=\"{0}\"}}') or use the Redis scaler instead.", language);
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn prometheus_requires_language_label() {
+        let yaml_missing = r#"triggers:\n  - type: prometheus\n    metadata:\n      serverAddress: http://optimus-api:3000\n      metricName: optimus_queue_depth\n      query: optimus_queue_depth"#;
+        assert!(validate_prometheus_scaled_object(yaml_missing, "python").is_err());
+
+        let yaml_ok = r#"triggers:\n  - type: prometheus\n    metadata:\n      serverAddress: http://optimus-api:3000\n      metricName: optimus_queue_depth\n      query: optimus_queue_depth{language=\"python\"}"#;
+        assert!(validate_prometheus_scaled_object(yaml_ok, "python").is_ok());
+    }
+}
+
 

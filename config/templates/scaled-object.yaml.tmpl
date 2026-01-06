@@ -10,7 +10,7 @@ metadata:
 spec:
   scaleTargetRef:
     name: optimus-worker-{{language}}  # Target language-specific deployment
-  minReplicaCount: 10  # Keep workers warm
+  minReplicaCount: 1  # Keep workers warm
   maxReplicaCount: 50  # Resource limit
   pollingInterval: 1  # Poll every second for quick response
   cooldownPeriod: 30  # Wait 30s before scaling down
