@@ -7,6 +7,9 @@ WORKDIR /app
 COPY . .
 
 # Build the worker binary
+ENV CARGO_REGISTRIES_CRATES_IO_PROTOCOL=sparse
+ENV CARGO_HTTP_TIMEOUT=120
+ENV CARGO_NET_RETRY=10
 RUN cargo build -p optimus-worker --release
 
 # Stage 2: Runtime

@@ -1,0 +1,39 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: optimus-image-warmer
+  namespace: optimus
+  labels:
+    app: optimus-image-warmer
+spec:
+  selector:
+    matchLabels:
+      app: optimus-image-warmer
+  template:
+    metadata:
+      labels:
+        app: optimus-image-warmer
+    spec:
+      # Init containers run sequentially to pull images one by one
+      initContainers:
+      - name: pull-python
+        image: optimus-python:latest
+        command: ["/bin/true"]
+        imagePullPolicy: IfNotPresent
+      - name: pull-java
+        image: optimus-java:latest
+        command: ["/bin/true"]
+        imagePullPolicy: IfNotPresent
+      - name: pull-rust
+        image: optimus-rust:latest
+        command: ["/bin/true"]
+        imagePullPolicy: IfNotPresent
+      
+      # Minimal pause container to keep DaemonSet running
+      containers:
+      - name: pause
+        image: registry.k8s.io/pause:3.9
+        resources:
+          requests:
+            cpu: "1m"
+            memory: "10Mi"

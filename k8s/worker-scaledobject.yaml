@@ -1,0 +1,18 @@
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: optimus-worker-scaler
+  namespace: optimus
+spec:
+  scaleTargetRef:
+    name: optimus-worker
+  minReplicaCount: 1
+  maxReplicaCount: 50
+  cooldownPeriod: 30
+  pollingInterval: 5
+  triggers:
+  - type: redis
+    metadata:
+      address: redis.optimus.svc.cluster.local:6379
+      listName: optimus:queue:jobs
+      listLength: "5"  # Scale up if >5 jobs pending

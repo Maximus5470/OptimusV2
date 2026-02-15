@@ -188,82 +188,10 @@ async fn main() -> anyhow::Result<()> {
         info!("✓ Image pre-pull complete");
     });
 
-    // ===== LANGUAGE BINDING ENFORCEMENT =====
-    // Worker MUST be bound to exactly one language via environment variables
-    // This is non-negotiable for proper scaling and isolation
-    
-    // 1. Validate OPTIMUS_LANGUAGE is set (REQUIRED)
-    let language_str = std::env::var("OPTIMUS_LANGUAGE")
-        .unwrap_or_else(|_| {
-            error!("❌ FATAL: OPTIMUS_LANGUAGE environment variable not set");
-            error!("Worker must be bound to a specific language (python, java, rust)");
-            error!("This worker cannot start without language specification");
-            std::process::exit(1);
-        });
-    
-    let language = match Language::from_str(&language_str) {
-        Some(lang) => lang,
-        None => {
-            error!("❌ FATAL: Invalid language: {}", language_str);
-            let valid_languages: Vec<String> = Language::all_variants()
-                .iter()
-                .map(|l| l.to_string())
-                .collect();
-            error!("Valid options: {}", valid_languages.join(", "));
-            std::process::exit(1);
-        }
-    };
-
-    // 2. Validate language configuration exists
-    if let Err(e) = config_manager.get_config(&language) {
-        error!("❌ FATAL: Language '{}' is not configured: {}", language, e);
-        error!("Available languages: {:?}", config_manager.list_languages());
-        std::process::exit(1);
-    }
-
-    // 3. Validate OPTIMUS_QUEUE matches language (REQUIRED)
-    let expected_queue = config_manager.get_queue_name(&language)?;
-    let queue_name = std::env::var("OPTIMUS_QUEUE")
-        .unwrap_or_else(|_| {
-            error!("❌ FATAL: OPTIMUS_QUEUE environment variable not set");
-            error!("Expected queue for {}: {}", language, expected_queue);
-            error!("Worker cannot start without queue specification");
-            std::process::exit(1);
-        });
-    
-    if queue_name != expected_queue {
-        error!("❌ FATAL: Queue mismatch detected");
-        error!("  Configured language: {}", language);
-        error!("  Expected queue: {}", expected_queue);
-        error!("  Actual queue: {}", queue_name);
-        error!("This configuration would cause routing bugs. Refusing to start.");
-        std::process::exit(1);
-    }
-
-    // 4. Validate OPTIMUS_IMAGE matches language (REQUIRED)
-    let expected_image = config_manager.get_image(&language)?;
-    let image = std::env::var("OPTIMUS_IMAGE")
-        .unwrap_or_else(|_| {
-            error!("❌ FATAL: OPTIMUS_IMAGE environment variable not set");
-            error!("Expected image for {}: {}", language, expected_image);
-            error!("Worker cannot start without image specification");
-            std::process::exit(1);
-        });
-    
-    if image != expected_image {
-        error!("❌ FATAL: Image mismatch detected");
-        error!("  Configured language: {}", language);
-        error!("  Expected image: {}", expected_image);
-        error!("  Actual image: {}", image);
-        error!("This configuration would cause execution bugs. Refusing to start.");
-        std::process::exit(1);
-    }
-
-    // ===== ALL VALIDATIONS PASSED =====
-    
-    info!("Worker configured for language: {}", language);
-    info!("Docker image: {}", image);
-    info!("Queue: {}", queue_name);
+    // ===== UNIVERSAL WORKER — No Language Binding =====
+    // Worker accepts jobs for ANY language from the unified queue.
+    // The correct sandbox image is selected at execution time based on job.language.
+    info!("Universal worker mode — accepting jobs for all languages");
 
     // Connect to Redis
     let redis_url = std::env::var("REDIS_URL")
@@ -273,7 +201,7 @@ async fn main() -> anyhow::Result<()> {
     let mut redis_conn = ::redis::aio::ConnectionManager::new(client).await?;
     
     info!("Connected to Redis: {}", redis_url);
-    info!("Worker is READY - waiting for jobs from queue: {}", queue_name);
+    info!("Worker is READY — waiting for jobs from unified queue: {}", optimus_common::redis::UNIFIED_QUEUE);
 
     // Create semaphore for concurrency control
     // This guarantees at most max_parallel_jobs jobs execute simultaneously
@@ -322,7 +250,7 @@ async fn main() -> anyhow::Result<()> {
     };
 
     tokio::select! {
-        _ = worker_loop(&mut redis_conn, &language, &config_manager, semaphore, active_jobs) => {},
+        _ = worker_loop(&mut redis_conn, &config_manager, semaphore, active_jobs) => {},
         _ = shutdown => {},
     }
 
@@ -330,10 +258,9 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-#[instrument(skip(redis_conn, config_manager, semaphore, active_jobs), fields(language = %language))]
+#[instrument(skip(redis_conn, config_manager, semaphore, active_jobs))]
 async fn worker_loop(
     redis_conn: &mut ::redis::aio::ConnectionManager,
-    language: &Language,
     config_manager: &LanguageConfigManager,
     semaphore: Arc<Semaphore>,
     active_jobs: Arc<RwLock<usize>>,
@@ -345,52 +272,41 @@ async fn worker_loop(
     
     loop {
         // Log idle state (waiting for jobs)
-        debug!("Worker IDLE - waiting for job from queue");
+        debug!("Worker IDLE — waiting for job from unified queue");
         
         // BLPOP with 30 second timeout for graceful shutdown
-        // PERFORMANCE FIX: Increased from 5s to 30s to reduce unnecessary wake-ups
-        // and Redis roundtrips under load. Still responsive enough for shutdown.
-        // Consumes from both main queue and retry queue (main has priority)
-        match redis::pop_job_with_retry(redis_conn, language, 30.0).await {
+        // Consumes from unified main queue and retry queue (main has priority)
+        match redis::pop_job_with_retry(redis_conn, 30.0).await {
             Ok(Some(mut job)) => {
                 let job_id = job.id.clone();
                 
-                // ===== CRITICAL: Language Mismatch Check =====
-                // Workers MUST only process jobs for their configured language
-                // This prevents cross-language execution bugs
-                if job.language != *language {
+                // Validate language config exists for this job
+                if let Err(e) = config_manager.get_config(&job.language) {
                     error!(
                         job_id = %job_id,
-                        worker_language = %language,
-                        job_language = %job.language,
-                        phase = "language_mismatch",
-                        "❌ FATAL: Job language mismatch - sending to DLQ"
-                    );
-                    error!(
-                        job_id = %job_id,
-                        "Worker bound to '{}' received '{}' job - this should never happen",
-                        language, job.language
+                        language = %job.language,
+                        error = %e,
+                        phase = "unsupported_language",
+                        "Job language not configured — sending to DLQ"
                     );
                     
-                    // This is a routing bug - send directly to DLQ
                     job.metadata.last_failure_reason = Some(format!(
-                        "Language routing error: worker bound to '{}' cannot execute '{}' job",
-                        language, job.language
+                        "Unsupported language: '{}' — no configuration found",
+                        job.language
                     ));
                     
                     if let Err(dlq_err) = redis::push_to_dlq(redis_conn, &job).await {
                         error!(
                             job_id = %job_id,
                             error = %dlq_err,
-                            "Failed to push misrouted job to DLQ"
+                            "Failed to push unsupported-language job to DLQ"
                         );
                     } else {
-                        warn!(job_id = %job_id, "Misrouted job sent to DLQ");
+                        warn!(job_id = %job_id, "Unsupported-language job sent to DLQ");
                     }
                     
                     continue;
                 }
-                // ===== End Language Validation =====
                 
                 // CRITICAL: Acquire semaphore permit before starting execution
                 // This enforces max_parallel_jobs limit

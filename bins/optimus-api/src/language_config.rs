@@ -14,7 +14,7 @@ pub struct LanguageConfig {
     pub image: String,
     pub dockerfile_path: String,
     pub execution: ExecutionConfig,
-    pub queue_name: String,
+
     pub memory_limit_mb: u32,
     pub cpu_limit: f64,
 }

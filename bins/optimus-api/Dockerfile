@@ -7,6 +7,9 @@ WORKDIR /app
 COPY . .
 
 # Build the API binary
+ENV CARGO_REGISTRIES_CRATES_IO_PROTOCOL=sparse
+ENV CARGO_HTTP_TIMEOUT=120
+ENV CARGO_NET_RETRY=10
 RUN cargo build -p optimus-api --release
 
 # Stage 2: Runtime

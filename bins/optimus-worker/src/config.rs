@@ -20,7 +20,7 @@ pub struct LanguageConfig {
     pub image: String,
     pub dockerfile_path: String,
     pub execution: LanguageExecution,
-    pub queue_name: String,
+
     pub memory_limit_mb: u32,
     pub cpu_limit: f32,
 }
@@ -76,10 +76,7 @@ impl LanguageConfigManager {
         Ok(self.get_config(language)?.image.clone())
     }
 
-    /// Get queue name for a language
-    pub fn get_queue_name(&self, language: &Language) -> Result<String> {
-        Ok(self.get_config(language)?.queue_name.clone())
-    }
+
 
     /// Get memory limit for a language
     pub fn get_memory_limit_mb(&self, language: &Language) -> Result<u32> {

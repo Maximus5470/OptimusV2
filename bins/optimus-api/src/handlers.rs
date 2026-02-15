@@ -591,38 +591,35 @@ pub async fn get_job_debug(
         }
     };
     
-    // Check all queues for this job (search all languages)
+    // Check unified queues for this job
     let mut in_main_queue = false;
     let mut in_retry_queue = false;
     let mut in_dlq = false;
     let mut job_metadata = None;
-    
-    for language in Language::all_variants() {
-        let lang = language.to_string();
-        // Check main queue
-        let main_queue = format!("optimus:queue:{}", lang);
-        if let Ok(items) = ::redis::cmd("LRANGE")
-            .arg(&main_queue)
-            .arg(0)
-            .arg(-1)
-            .query_async::<_, Vec<String>>(&mut conn)
-            .await
-        {
-            for item in items {
-                if let Ok(job) = serde_json::from_str::<optimus_common::types::JobRequest>(&item) {
-                    if job.id == job_uuid {
-                        in_main_queue = true;
-                        job_metadata = Some(job.metadata);
-                        break;
-                    }
+
+    // Check main unified queue
+    if let Ok(items) = ::redis::cmd("LRANGE")
+        .arg(optimus_common::redis::UNIFIED_QUEUE)
+        .arg(0)
+        .arg(-1)
+        .query_async::<_, Vec<String>>(&mut conn)
+        .await
+    {
+        for item in items {
+            if let Ok(job) = serde_json::from_str::<optimus_common::types::JobRequest>(&item) {
+                if job.id == job_uuid {
+                    in_main_queue = true;
+                    job_metadata = Some(job.metadata);
+                    break;
                 }
             }
         }
-        
-        // Check retry queue
-        let retry_queue = format!("optimus:queue:{}:retry", lang);
+    }
+    
+    // Check unified retry queue
+    if !in_main_queue {
         if let Ok(items) = ::redis::cmd("LRANGE")
-            .arg(&retry_queue)
+            .arg(optimus_common::redis::UNIFIED_RETRY_QUEUE)
             .arg(0)
             .arg(-1)
             .query_async::<_, Vec<String>>(&mut conn)
@@ -638,11 +635,12 @@ pub async fn get_job_debug(
                 }
             }
         }
-        
-        // Check DLQ
-        let dlq = format!("optimus:queue:{}:dlq", lang);
+    }
+    
+    // Check unified DLQ
+    if !in_main_queue && !in_retry_queue {
         if let Ok(items) = ::redis::cmd("LRANGE")
-            .arg(&dlq)
+            .arg(optimus_common::redis::UNIFIED_DLQ)
             .arg(0)
             .arg(-1)
             .query_async::<_, Vec<String>>(&mut conn)
@@ -657,10 +655,6 @@ pub async fn get_job_debug(
                     }
                 }
             }
-        }
-        
-        if in_main_queue || in_retry_queue || in_dlq {
-            break;
         }
     }
     

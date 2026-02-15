@@ -35,10 +35,10 @@ lazy_static! {
     )
     .expect("metric can be created");
 
-    // Queue depth gauge (current depth per language)
+    // Queue depth gauge (current depth per queue)
     pub static ref QUEUE_DEPTH: IntGaugeVec = IntGaugeVec::new(
-        Opts::new("optimus_queue_depth", "Current queue depth per language"),
-        &["language"]
+        Opts::new("optimus_queue_depth", "Current depth of job queues"),
+        &["queue"]
     )
     .expect("metric can be created");
 
@@ -65,34 +65,16 @@ lazy_static! {
 }
 
 /// Initialize metrics registry
+/// Idempotent: safe to call multiple times (e.g. in tests)
 pub fn init_metrics() {
-    REGISTRY
-        .register(Box::new(JOBS_SUBMITTED.clone()))
-        .expect("collector can be registered");
-
-    REGISTRY
-        .register(Box::new(JOBS_COMPLETED.clone()))
-        .expect("collector can be registered");
-
-    REGISTRY
-        .register(Box::new(JOB_EXECUTION_TIME.clone()))
-        .expect("collector can be registered");
-
-    REGISTRY
-        .register(Box::new(QUEUE_DEPTH.clone()))
-        .expect("collector can be registered");
-
-    REGISTRY
-        .register(Box::new(API_REQUESTS.clone()))
-        .expect("collector can be registered");
-
-    REGISTRY
-        .register(Box::new(JOBS_REJECTED.clone()))
-        .expect("collector can be registered");
-
-    REGISTRY
-        .register(Box::new(JOBS_CANCELLED.clone()))
-        .expect("collector can be registered");
+    // Register metrics, ignoring errors if already registered
+    let _ = REGISTRY.register(Box::new(JOBS_SUBMITTED.clone()));
+    let _ = REGISTRY.register(Box::new(JOBS_COMPLETED.clone()));
+    let _ = REGISTRY.register(Box::new(JOB_EXECUTION_TIME.clone()));
+    let _ = REGISTRY.register(Box::new(QUEUE_DEPTH.clone()));
+    let _ = REGISTRY.register(Box::new(API_REQUESTS.clone()));
+    let _ = REGISTRY.register(Box::new(JOBS_REJECTED.clone()));
+    let _ = REGISTRY.register(Box::new(JOBS_CANCELLED.clone()));
 }
 
 /// Render metrics in Prometheus text format
@@ -120,18 +102,29 @@ pub fn record_job_completed(language: &str, status: &str, execution_time_ms: f64
     JOB_EXECUTION_TIME.with_label_values(&[language]).observe(execution_time_ms);
 }
 
-/// Update queue depth for a language
+/// Update queue depth for unified queues
 pub async fn update_queue_depths(redis_conn: &mut redis::aio::ConnectionManager) {
     use redis::AsyncCommands;
-    use optimus_common::types::Language;
     
-    for language in Language::all_variants() {
-        let queue_name = optimus_common::redis::queue_name(language);
-        if let Ok(depth) = redis_conn.llen::<_, i64>(&queue_name).await {
-            QUEUE_DEPTH
-                .with_label_values(&[&language.to_string()])
-                .set(depth);
-        }
+    // Unified Main Queue
+    if let Ok(depth) = redis_conn.llen::<_, i64>(optimus_common::redis::UNIFIED_QUEUE).await {
+        QUEUE_DEPTH
+            .with_label_values(&["main"])
+            .set(depth);
+    }
+
+    // Unified Retry Queue
+    if let Ok(depth) = redis_conn.llen::<_, i64>(optimus_common::redis::UNIFIED_RETRY_QUEUE).await {
+        QUEUE_DEPTH
+            .with_label_values(&["retry"])
+            .set(depth);
+    }
+
+    // Unified DLQ
+    if let Ok(depth) = redis_conn.llen::<_, i64>(optimus_common::redis::UNIFIED_DLQ).await {
+        QUEUE_DEPTH
+            .with_label_values(&["dlq"])
+            .set(depth);
     }
 }
 

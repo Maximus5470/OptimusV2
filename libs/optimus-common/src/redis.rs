@@ -11,17 +11,27 @@ pub const STATUS_PREFIX: &str = "optimus:status";
 pub const METRICS_PREFIX: &str = "optimus:metrics";
 pub const CONTROL_PREFIX: &str = "optimus:control";
 
+// ===== UNIFIED QUEUE (Universal Worker Architecture) =====
+// All languages share a single queue. Workers pick up any job and
+// select the correct sandbox image at execution time.
+pub const UNIFIED_QUEUE: &str = "optimus:queue:jobs";
+pub const UNIFIED_RETRY_QUEUE: &str = "optimus:queue:jobs:retry";
+pub const UNIFIED_DLQ: &str = "optimus:queue:jobs:dlq";
+
 /// Generate deterministic queue name for a language
+#[deprecated(note = "Use UNIFIED_QUEUE constant instead — Universal Worker architecture")]
 pub fn queue_name(language: &Language) -> String {
     format!("{}:{}", QUEUE_PREFIX, language)
 }
 
 /// Generate retry queue name for a language
+#[deprecated(note = "Use UNIFIED_RETRY_QUEUE constant instead — Universal Worker architecture")]
 pub fn retry_queue_name(language: &Language) -> String {
     format!("{}:{}:retry", QUEUE_PREFIX, language)
 }
 
 /// Generate dead letter queue name for a language
+#[deprecated(note = "Use UNIFIED_DLQ constant instead — Universal Worker architecture")]
 pub fn dlq_name(language: &Language) -> String {
     format!("{}:{}:dlq", QUEUE_PREFIX, language)
 }
@@ -41,52 +51,48 @@ pub fn control_key(job_id: &uuid::Uuid) -> String {
     format!("{}:{}", CONTROL_PREFIX, job_id)
 }
 
-/// Push a job to the language-specific queue
+/// Push a job to the unified queue (all languages)
 /// Uses RPUSH for FIFO semantics
 pub async fn push_job(
     conn: &mut redis::aio::ConnectionManager,
     job: &JobRequest,
 ) -> RedisResult<()> {
-    let queue = queue_name(&job.language);
     let payload = serde_json::to_string(job)
         .map_err(|e| redis::RedisError::from((redis::ErrorKind::TypeError, "serialization error", e.to_string())))?;
     
-    conn.rpush(&queue, payload).await
+    conn.rpush(UNIFIED_QUEUE, payload).await
 }
 
-/// Push a job to the retry queue
+/// Push a job to the unified retry queue
 pub async fn push_to_retry_queue(
     conn: &mut redis::aio::ConnectionManager,
     job: &JobRequest,
 ) -> RedisResult<()> {
-    let queue = retry_queue_name(&job.language);
     let payload = serde_json::to_string(job)
         .map_err(|e| redis::RedisError::from((redis::ErrorKind::TypeError, "serialization error", e.to_string())))?;
     
-    conn.rpush(&queue, payload).await
+    conn.rpush(UNIFIED_RETRY_QUEUE, payload).await
 }
 
-/// Push a job to the dead letter queue
+/// Push a job to the unified dead letter queue
 pub async fn push_to_dlq(
     conn: &mut redis::aio::ConnectionManager,
     job: &JobRequest,
 ) -> RedisResult<()> {
-    let queue = dlq_name(&job.language);
     let payload = serde_json::to_string(job)
         .map_err(|e| redis::RedisError::from((redis::ErrorKind::TypeError, "serialization error", e.to_string())))?;
     
-    conn.rpush(&queue, payload).await
+    conn.rpush(UNIFIED_DLQ, payload).await
 }
 
-/// Pop a job from the language-specific queue
+/// Pop a job from the unified queue (language-agnostic)
 /// Uses BLPOP with timeout for graceful shutdown
+/// Workers use this to pick up ANY language job
 pub async fn pop_job(
     conn: &mut redis::aio::ConnectionManager,
-    language: &Language,
     timeout_seconds: f64,
 ) -> RedisResult<Option<JobRequest>> {
-    let queue = queue_name(language);
-    let result: Option<(String, String)> = conn.blpop(&queue, timeout_seconds).await?;
+    let result: Option<(String, String)> = conn.blpop(UNIFIED_QUEUE, timeout_seconds).await?;
     
     match result {
         Some((_key, payload)) => {
@@ -98,18 +104,15 @@ pub async fn pop_job(
     }
 }
 
-/// Pop a job from either the main queue or retry queue (priority: main first)
+/// Pop a job from unified main queue or retry queue (priority: main first)
 /// Uses BLPOP with multiple keys - Redis pops from first non-empty queue
+/// Language-agnostic: any worker can pick up any job
 pub async fn pop_job_with_retry(
     conn: &mut redis::aio::ConnectionManager,
-    language: &Language,
     timeout_seconds: f64,
 ) -> RedisResult<Option<JobRequest>> {
-    let main_queue = queue_name(language);
-    let retry_queue = retry_queue_name(language);
-    
-    // BLPOP checks keys in order - main queue has priority
-    let result: Option<(String, String)> = conn.blpop(&[main_queue, retry_queue], timeout_seconds).await?;
+    // BLPOP checks keys in order - main queue has priority over retry
+    let result: Option<(String, String)> = conn.blpop(&[UNIFIED_QUEUE, UNIFIED_RETRY_QUEUE], timeout_seconds).await?;
     
     match result {
         Some((_key, payload)) => {
@@ -243,20 +246,13 @@ pub async fn is_job_cancelled(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::Language;
     use uuid::Uuid;
 
     #[test]
-    fn test_queue_naming() {
-        assert_eq!(queue_name(&Language::Python), "optimus:queue:python");
-        assert_eq!(queue_name(&Language::Java), "optimus:queue:java");
-        assert_eq!(queue_name(&Language::Rust), "optimus:queue:rust");
-        
-        assert_eq!(retry_queue_name(&Language::Python), "optimus:queue:python:retry");
-        assert_eq!(retry_queue_name(&Language::Java), "optimus:queue:java:retry");
-        
-        assert_eq!(dlq_name(&Language::Python), "optimus:queue:python:dlq");
-        assert_eq!(dlq_name(&Language::Rust), "optimus:queue:rust:dlq");
+    fn test_unified_queue_constants() {
+        assert_eq!(UNIFIED_QUEUE, "optimus:queue:jobs");
+        assert_eq!(UNIFIED_RETRY_QUEUE, "optimus:queue:jobs:retry");
+        assert_eq!(UNIFIED_DLQ, "optimus:queue:jobs:dlq");
     }
 
     #[test]

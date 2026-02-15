@@ -3,37 +3,84 @@ kind: Deployment
 metadata:
   name: optimus-worker
   namespace: optimus
+  labels:
+    app: optimus-worker
 spec:
-  replicas: 1  # Will be scaled by KEDA
+  replicas: 1  # Controlled by KEDA (min: 1, max: 50)
   selector:
     matchLabels:
       app: optimus-worker
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
   template:
     metadata:
       labels:
         app: optimus-worker
     spec:
+      terminationGracePeriodSeconds: 300  # Allow running jobs to finish
       containers:
       - name: optimus-worker
         image: optimus-worker:latest
         imagePullPolicy: IfNotPresent
+        ports:
+        - containerPort: 8080
+          name: health
         env:
-        - name: REDIS_HOST
-          value: "redis:6379"
+        # ===== UNIVERSAL WORKER CONFIG =====
         - name: RUST_LOG
           value: "info"
+        - name: REDIS_URL
+          value: "redis://redis:6379"
+        - name: HEALTH_PORT
+          value: "8080"
         - name: DOCKER_HOST
           value: "unix:///var/run/docker.sock"
+        
+        # ===== CONCURRENCY CONTROL =====
+        # Set to support moderate parallelism. Tuning requires monitoring.
+        - name: OPTIMUS_MAX_PARALLEL_JOBS
+          value: "20"
+        - name: OPTIMUS_MAX_PARALLEL_TESTS
+          value: "5"
+
+        # ===== EXECUTION MODE =====
+        - name: USE_COMPILE_ONCE
+          value: "true"
+
         volumeMounts:
         - name: docker-sock
           mountPath: /var/run/docker.sock
+        
+        # Resources sized for largest workload (Java)
         resources:
           requests:
-            memory: "256Mi"
-            cpu: "200m"
-          limits:
             memory: "1Gi"
             cpu: "1000m"
+          limits:
+            memory: "2Gi"
+            cpu: "4000m"
+        
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8080
+          initialDelaySeconds: 15
+          periodSeconds: 30
+          timeoutSeconds: 5
+          failureThreshold: 3
+        
+        readinessProbe:
+          httpGet:
+            path: /ready
+            port: 8080
+          initialDelaySeconds: 10
+          periodSeconds: 10
+          timeoutSeconds: 3
+          failureThreshold: 2
+      
       volumes:
       - name: docker-sock
         hostPath:

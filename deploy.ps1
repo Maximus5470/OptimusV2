@@ -151,13 +151,14 @@ if (-not $SkipImages) {
 }
 
 # Step 5: Render Kubernetes manifests
-Write-Step "Rendering Kubernetes manifests..."
-cargo run --bin optimus-cli --release -- render-k8s
-if ($LASTEXITCODE -ne 0) {
-    Write-Error "Failed to render manifests"
-    exit 1
-}
-Write-Success "Manifests rendered"
+# SKIPPED: Using manual manifests for Universal Worker architecture
+# Write-Step "Rendering Kubernetes manifests..."
+# cargo run --bin optimus-cli --release -- render-k8s
+# if ($LASTEXITCODE -ne 0) {
+#     Write-Error "Failed to render manifests"
+#     exit 1
+# }
+# Write-Success "Manifests rendered (Skipped)"
 
 # Step 6: Install KEDA
 if (-not $SkipKeda) {
@@ -246,14 +247,23 @@ if (-not $apiReady) {
 Write-Success "API deployed"
 
 # Step 10: Deploy workers
-Write-Step "Deploying language-specific worker deployments..."
-Write-Info "Each deployment uses the same optimus-worker image with different env vars"
-kubectl apply -f k8s/workers/
-Write-Success "Worker deployments created (scaled to 0, waiting for jobs)"
+Write-Step "Deploying Universal Worker & Image Warmer..."
+
+# Deploy Image Warmer DaemonSet first
+Write-Info "Deploying Image Warmer DaemonSet..."
+kubectl apply -f k8s/image-warmer-daemonset.yaml
+
+# Deploy Universal Worker
+Write-Info "Cleaning up legacy per-language deployments..."
+kubectl delete deployment optimus-worker-python optimus-worker-java optimus-worker-rust --ignore-not-found=true
+
+Write-Info "Deploying Universal Worker Deployment..."
+kubectl apply -f k8s/worker-deployment.yaml
+Write-Success "Universal Worker deployed"
 
 # Step 11: Deploy KEDA scalers
 Write-Step "Deploying KEDA ScaledObjects..."
-kubectl apply -f k8s/keda/scaled-object-*.yaml
+kubectl apply -f k8s/worker-scaledobject.yaml
 Write-Success "KEDA scalers deployed"
 
 # Step 12: Verify deployment
@@ -307,8 +317,8 @@ Monitor autoscaling:
    # Watch pods scale up/down:
    kubectl get pods -n optimus -w
 
-   # Check queue lengths:
-   kubectl exec -n optimus deployment/redis -- redis-cli LLEN optimus:queue:python
+   # Check queue lengths (unified queue):
+   kubectl exec -n optimus deployment/redis -- redis-cli LLEN optimus:queue:jobs
 
    # View KEDA scaler events:
    kubectl describe scaledobject -n optimus
@@ -318,8 +328,8 @@ Logs:
    # API logs:
    kubectl logs -n optimus -l app=optimus-api -f
 
-   # Worker logs:
-   kubectl logs -n optimus -l app=optimus-worker-python -f
+   # Universal Worker logs:
+   kubectl logs -n optimus -l app=optimus-worker -f
 
 Uninstall:
 

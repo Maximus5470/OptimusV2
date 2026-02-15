@@ -10,7 +10,7 @@
         "args": [],
         "file_extension": ".py"
       },
-      "queue_name": "optimus:queue:python",
+
       "memory_limit_mb": 256,
       "cpu_limit": 0.5,
       "resources": {
@@ -38,7 +38,7 @@
         "args": [],
         "file_extension": ".java"
       },
-      "queue_name": "optimus:queue:java",
+
       "memory_limit_mb": 512,
       "cpu_limit": 1.0,
       "resources": {
@@ -66,7 +66,7 @@
         "args": [],
         "file_extension": ".rs"
       },
-      "queue_name": "optimus:queue:rust",
+
       "memory_limit_mb": 512,
       "cpu_limit": 1.0,
       "resources": {
